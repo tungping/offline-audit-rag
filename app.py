@@ -16,6 +16,7 @@ BASE_DIR = "."
 INBOX = os.path.join(BASE_DIR, "inbox")
 OUTPUT = os.path.join(BASE_DIR, "output")
 ARCHIVE = os.path.join(BASE_DIR, "archive")
+FAILED = os.path.join(BASE_DIR, "failed")
 CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
 VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
 
@@ -241,20 +242,19 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
         retrieved_docs = results['documents'][0]
     return retrieved_docs
 
-def safe_archive(src_path):
+def safe_move(src_path, dest_dir):
     """
-    将文件安全归档至 archive 目录：
+    将文件安全移动至指定目录：
     - 使用 shutil.move() 替代 os.rename()，兼容跨文件系统移动。
     - 若目标已有同名文件，自动追加时间戳后缀避免静默覆盖。
     """
     filename = os.path.basename(src_path)
-    dest_path = os.path.join(ARCHIVE, filename)
+    dest_path = os.path.join(dest_dir, filename)
 
     if os.path.exists(dest_path):
-        # 同名文件已存在，追加时间戳后缀区分
         base, ext = os.path.splitext(filename)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        dest_path = os.path.join(ARCHIVE, f"{base}_{timestamp}{ext}")
+        dest_path = os.path.join(dest_dir, f"{base}_{timestamp}{ext}")
 
     shutil.move(src_path, dest_path)
 
@@ -385,7 +385,7 @@ def process_file(file_path, collection, progress_prefix=""):
 
 # 检查并自动构建文件夹环境
 def check_environment():
-    dirs = [INBOX, OUTPUT, ARCHIVE, CONFIG_DIR, VECTOR_STORE_DIR]
+    dirs = [INBOX, OUTPUT, ARCHIVE, FAILED, CONFIG_DIR, VECTOR_STORE_DIR]
     for d in dirs:
         os.makedirs(d, exist_ok=True)
 
@@ -448,11 +448,12 @@ if __name__ == "__main__":
 
                     success = process_file(full_path, collection, progress_prefix=progress_prefix)
 
-                    # 修复：仅在处理成功后才归档，失败时保留在 inbox 以便重新处理
+                    # 处理成功 -> 归档至 archive；失败 -> 隔离至 failed，不再重试
                     if success:
-                        safe_archive(full_path)
+                        safe_move(full_path, ARCHIVE)
                     else:
-                        print(f"文件【{file}】解析失败，已保留在 inbox 目录，可修正后重新投入。")
+                        safe_move(full_path, FAILED)
+                        print(f"文件【{file}】解析失败，已移至 failed 目录隔离，请人工检查后再决定是否重新投入 inbox。")
 
                 print("\n当前所有文件已分析完成！审计结果已生成至 output 目录，且 inbox 中的原文件已全部移至 archive 目录归档。")
                 print("您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
