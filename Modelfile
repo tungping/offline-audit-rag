@@ -1,0 +1,16 @@
+FROM qwen3.5:9b
+
+# 设置 ChatML 对话模板以支持 System Prompt 和结构化对话
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{- end }}
+{{- if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{- end }}
+<|im_start|>assistant
+{{ .Response }}<|im_end|>"""
+
+# 设置生成参数，temperature=0.1 保证低随机性与输出稳定
+PARAMETER temperature 0.1
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
