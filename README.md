@@ -89,7 +89,17 @@ uv pip install -r requirements.txt
 - 创建所有必要目录（`inbox/`、`output/`、`archive/`、`failed/`、`config/compliance_rules/`、`vector_store/`）
 - 生成默认 PMO 合规规范文件并写入向量库
 
-### 5. 开始审计
+### 5. 可选性能参数
+
+向量库首次构建时，脚本默认同时发起 2 个 embedding 请求，适合 M1 Pro 16GB 这类本地 Ollama 环境：
+
+```bash
+EMBEDDING_CONCURRENCY=2 .venv/bin/python app.py
+```
+
+如果初始化稳定但希望更快，可以尝试 `EMBEDDING_CONCURRENCY=3`；如果同时运行 IDE、浏览器或其他大模型任务，建议降为 `1`。
+
+### 6. 开始审计
 
 将待审计的会议记录或项目日志（`.txt` 格式）放入 `inbox/` 目录，脚本将自动开始分析。
 

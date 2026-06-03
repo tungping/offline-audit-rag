@@ -12,13 +12,16 @@ import ollama
 import chromadb
 
 # 配置本地物理路径
-BASE_DIR = "."
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(BASE_DIR, "inbox")
 OUTPUT = os.path.join(BASE_DIR, "output")
 ARCHIVE = os.path.join(BASE_DIR, "archive")
 FAILED = os.path.join(BASE_DIR, "failed")
 CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
 VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
+
+EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "2"))
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 
 # 严密的 SYSTEM PROMPT 模板，包含动态嵌入的合规标准上下文
 SYSTEM_PROMPT_TEMPLATE = """You are an expert PMO (Project Management Office) Compliance Auditor and Technical Operations Analyst. Your job is to analyze messy, unformatted technical meeting notes or logs, perform a strict compliance check against standard software engineering workflows using the provided compliance standards, and extract actionable tasks.
@@ -79,6 +82,12 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
         if not seps:
             return [text_to_split]
         sep = seps[0]
+        if sep == "":
+            return [
+                text_to_split[i:i + chunk_size]
+                for i in range(0, len(text_to_split), chunk_size)
+            ]
+
         parts = text_to_split.split(sep)
         chunks = []
         current_chunk = []
@@ -143,13 +152,23 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
 
 async def _fetch_embeddings_async(documents):
     """
-    优化：使用异步并发方式批量获取所有文档的向量，替代串行逐个请求。
-    对 20 个 chunk 的知识库初始化，速度可提升数倍。
+    使用有限并发批量获取文档向量，避免本地 Ollama 在大批量初始化时过载。
     """
     client = ollama.AsyncClient()
-    tasks = [client.embeddings(model="nomic-embed-text", prompt=doc) for doc in documents]
-    results = await asyncio.gather(*tasks)
-    return [res['embedding'] for res in results]
+    semaphore = asyncio.Semaphore(max(1, EMBEDDING_CONCURRENCY))
+
+    async def embed_one(doc):
+        async with semaphore:
+            for attempt in range(EMBEDDING_MAX_RETRIES):
+                try:
+                    res = await client.embeddings(model="nomic-embed-text", prompt=doc)
+                    return res['embedding']
+                except Exception:
+                    if attempt == EMBEDDING_MAX_RETRIES - 1:
+                        raise
+                    await asyncio.sleep(1 + attempt)
+
+    return await asyncio.gather(*(embed_one(doc) for doc in documents))
 
 def initialize_knowledge_base():
     """
@@ -242,98 +261,149 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
         retrieved_docs = results['documents'][0]
     return retrieved_docs
 
-def safe_move(src_path, dest_dir):
+def safe_move(src_path, dest_dir, timestamp_func=None):
     """
     将文件安全移动至指定目录：
     - 使用 shutil.move() 替代 os.rename()，兼容跨文件系统移动。
     - 若目标已有同名文件，自动追加时间戳后缀避免静默覆盖。
     """
+    if timestamp_func is None:
+        timestamp_func = lambda: time.strftime("%Y%m%d_%H%M%S")
+
     filename = os.path.basename(src_path)
     dest_path = os.path.join(dest_dir, filename)
 
     if os.path.exists(dest_path):
         base, ext = os.path.splitext(filename)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        timestamp = timestamp_func()
         dest_path = os.path.join(dest_dir, f"{base}_{timestamp}{ext}")
+        counter = 1
+        while os.path.exists(dest_path):
+            dest_path = os.path.join(dest_dir, f"{base}_{timestamp}_{counter}{ext}")
+            counter += 1
 
     shutil.move(src_path, dest_path)
+    return dest_path
+
+def extract_json_object(response_text):
+    """
+    从模型输出中提取第一个完整 JSON 对象，兼容 think 标签、代码块和前后说明文字。
+    """
+    text = response_text.strip()
+    if "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1]
+    elif "```" in text:
+        text = text.split("```", 1)[1]
+    if "```" in text:
+        text = text.split("```", 1)[0]
+
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("模型输出中未找到 JSON 对象起始符")
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if escape_next:
+            escape_next = False
+            continue
+        if char == "\\" and in_string:
+            escape_next = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1].strip()
+
+    raise ValueError("模型输出中的 JSON 对象不完整")
+
+def markdown_table_cell(value):
+    """
+    转义 Markdown 表格单元格，避免模型输出中的竖线或换行破坏表格结构。
+    """
+    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+def markdown_quote_block(text):
+    return "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
 
 def process_file(file_path, collection, progress_prefix=""):
     """
     对单个文件执行完整的 RAG 审计流程。
     返回 True 表示处理成功并已写入报告，返回 False 表示处理失败（文件不应被归档）。
     """
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    # 1. 语义检索合规基准
-    retrieved_docs = retrieve_relevant_context(collection, content, top_k=3)
-    compliance_context = "\n\n".join([f"【条款 {i+1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)])
-
-    # 2. 组装 SYSTEM PROMPT
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(compliance_context=compliance_context)
-
-    # 3. 本地大模型推理并流式监听
-    print(f"  提示：模型分析中，如需强制退出请按 Ctrl+C")
-    response_stream = ollama.generate(
-        model='qwen3.5:9b',  # 本地运行的大模型大脑
-        prompt=content,
-        system=system_prompt,
-        options={
-            "temperature": 0.1,
-            "num_ctx": 8192,  # 增大上下文窗口到 8K，避免推理链条长时被截断
-            "num_keep": 0     # 防止 KV cache 污染，保证多次推理的格式稳定
-        },
-        stream=True
-    )
-
     full_response = ""
-    spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-    spinner_idx = 0
-
-    if not progress_prefix:
-        progress_prefix = f"正在分析: {os.path.basename(file_path)}"
-
-    for chunk in response_stream:
-        token = chunk['response']
-        full_response += token
-        print(f"\r{progress_prefix}... {spinner[spinner_idx]} ", end="", flush=True)
-        spinner_idx = (spinner_idx + 1) % len(spinner)
-
-    print(f"\r{progress_prefix}... 完成!   \n")
-
-    # 4. 模型响应过滤与容错 JSON 解析
     try:
-        response_text = full_response.strip()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
 
-        # 过滤 <think> 标签（深度推理链）
-        if "</think>" in response_text:
-            response_text = response_text.split("</think>")[-1].strip()
+        # 1. 语义检索合规基准
+        retrieved_docs = retrieve_relevant_context(collection, content, top_k=3)
+        compliance_context = "\n\n".join([f"【条款 {i+1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)])
 
-        # 过滤 markdown 代码块包裹
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        elif response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
+        # 2. 组装 SYSTEM PROMPT
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(compliance_context=compliance_context)
 
-        response_text = response_text.strip()
+        # 3. 本地大模型推理并流式监听
+        print(f"  提示：模型分析中，如需强制退出请按 Ctrl+C")
+        response_stream = ollama.generate(
+            model='qwen3.5:9b',  # 本地运行的大模型大脑
+            prompt=content,
+            system=system_prompt,
+            options={
+                "temperature": 0.1,
+                "num_ctx": 8192,  # 增大上下文窗口到 8K，避免推理链条长时被截断
+                "num_keep": 0     # 防止 KV cache 污染，保证多次推理的格式稳定
+            },
+            stream=True
+        )
 
-        # 解析 JSON
-        data = json.loads(response_text)
+        spinner = ['|', '/', '-', '\\']
+        spinner_idx = 0
+
+        if not progress_prefix:
+            progress_prefix = f"正在分析: {os.path.basename(file_path)}"
+
+        for chunk in response_stream:
+            token = chunk.get('response', '')
+            full_response += token
+            print(f"\r{progress_prefix}... {spinner[spinner_idx]} ", end="", flush=True)
+            spinner_idx = (spinner_idx + 1) % len(spinner)
+
+        print(f"\r{progress_prefix}... 完成!   \n")
+
+        # 4. 模型响应过滤与容错 JSON 解析
+        data = json.loads(extract_json_object(full_response))
+        if not isinstance(data.get('tasks'), list):
+            data['tasks'] = []
+        data.setdefault('compliance_risk', '未知')
+        data.setdefault('audit_summary', '模型未返回审计总结')
 
         # 5. 数据清洗与加工 (CSV/Pandas)
         df = pd.DataFrame(data['tasks'])
+        for column, default in {
+            'task_name': '未知任务',
+            'owner': 'Unassigned',
+            'priority': 'Medium',
+        }.items():
+            if column not in df.columns:
+                df[column] = default
         df = df.drop_duplicates()  # 清除偶发重复任务
 
         # 字段空值与默认值修正（修复：使用字典形式的 replace 保证跨版本兼容）
-        if 'owner' in df.columns:
-            df['owner'] = df['owner'].fillna("Unassigned").replace({"": "Unassigned"})
-        if 'task_name' in df.columns:
-            df['task_name'] = df['task_name'].fillna("未知任务").replace({"": "未知任务"})
-        if 'priority' in df.columns:
-            df['priority'] = df['priority'].fillna("Medium").replace({"": "Medium"})
+        df['owner'] = df['owner'].fillna("Unassigned").replace({"": "Unassigned"})
+        df['task_name'] = df['task_name'].fillna("未知任务").replace({"": "未知任务"})
+        df['priority'] = df['priority'].fillna("Medium").replace({"": "Medium"})
 
         df['audit_time'] = time.strftime("%Y-%m-%d %H_%M_%S")
 
@@ -358,7 +428,7 @@ def process_file(file_path, collection, progress_prefix=""):
 在本次审计中，语义数据库成功为您提取了最相近的 {len(retrieved_docs)} 条合规基线规范：
 """
         for i, doc in enumerate(retrieved_docs):
-            md_content += f"\n> **参考规范 {i+1}**:\n> {doc.strip()}\n"
+            md_content += f"\n> **参考规范 {i+1}**:\n{markdown_quote_block(doc)}\n"
 
         md_content += """
 ## 三、提取指派的任务看板
@@ -368,7 +438,12 @@ def process_file(file_path, collection, progress_prefix=""):
 | :--- | :--- | :--- | :--- | :--- |
 """
         for i, row in df.iterrows():
-            md_content += f"| {i+1} | {row.get('task_name')} | {row.get('owner')} | {row.get('priority')} | {row.get('audit_time')} |\n"
+            md_content += (
+                f"| {i+1} | {markdown_table_cell(row.get('task_name'))} | "
+                f"{markdown_table_cell(row.get('owner'))} | "
+                f"{markdown_table_cell(row.get('priority'))} | "
+                f"{markdown_table_cell(row.get('audit_time'))} |\n"
+            )
 
         # 保存 Markdown 报告
         md_path = os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md")
@@ -379,8 +454,9 @@ def process_file(file_path, collection, progress_prefix=""):
         return True  # 明确返回成功标志，主循环凭此决定是否归档
 
     except Exception as e:
-        print(f"解析失败，模型输出内容不符合JSON标准: {e}")
-        print(f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------")
+        print(f"文件处理失败: {e}")
+        if full_response:
+            print(f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------")
         return False  # 返回失败标志，主循环不会归档此文件
 
 # 检查并自动构建文件夹环境
@@ -440,6 +516,8 @@ if __name__ == "__main__":
             files = sorted([f for f in os.listdir(INBOX) if f.endswith('.txt')])
             if files:
                 total_files = len(files)
+                success_count = 0
+                failed_count = 0
                 for idx, file in enumerate(files):
                     full_path = os.path.join(INBOX, file)
                     processed_count = idx
@@ -451,11 +529,17 @@ if __name__ == "__main__":
                     # 处理成功 -> 归档至 archive；失败 -> 隔离至 failed，不再重试
                     if success:
                         safe_move(full_path, ARCHIVE)
+                        success_count += 1
                     else:
                         safe_move(full_path, FAILED)
+                        failed_count += 1
                         print(f"文件【{file}】解析失败，已移至 failed 目录隔离，请人工检查后再决定是否重新投入 inbox。")
 
-                print("\n当前所有文件已分析完成！审计结果已生成至 output 目录，且 inbox 中的原文件已全部移至 archive 目录归档。")
+                    if check_exit_or_sleep(0.1):
+                        print("\n检测到 ESC 键，当前文件已处理完成，自动化工作流已安全退出。")
+                        sys.exit(0)
+
+                print(f"\n当前批次已处理完成：成功 {success_count} 个，失败 {failed_count} 个。")
                 print("您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
             if check_exit_or_sleep(3.0):
                 print("\n检测到 ESC 键，自动化工作流已安全退出。")
