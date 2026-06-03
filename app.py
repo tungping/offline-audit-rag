@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import sys
+import select
 import pandas as pd
 import ollama
 import chromadb
@@ -351,12 +353,29 @@ def check_environment():
     for d in dirs:
         os.makedirs(d, exist_ok=True)
 
+
+def check_exit_or_sleep(timeout=3.0):
+    """
+    非阻塞检查 sys.stdin 是否有 quit 输入，并在没有输入时睡眠指定的秒数。
+    如果用户输入了 quit，返回 True，否则返回 False。
+    """
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        # select.select 轮询 stdin，超时为 0.1 秒
+        r, _, _ = select.select([sys.stdin], [], [], 0.1)
+        if r:
+            line = sys.stdin.readline().strip().lower()
+            if line == 'quit':
+                return True
+        time.sleep(0.1)
+    return False
+
 if __name__ == "__main__":
     check_environment()
     print("正在连接本地向量库与初始化知识库...")
     collection = initialize_knowledge_base()
     
-    print("\n本地 RAG 自动化工作流已就绪，正在轮询监听 inbox 文件夹...")
+    print("\n本地 RAG 自动化工作流已就绪，正在轮询监听 inbox 文件夹（输入 quit 并回车可随时退出）...")
     while True:
         try:
             files = [f for f in os.listdir(INBOX) if f.endswith('.txt')]
@@ -371,11 +390,14 @@ if __name__ == "__main__":
                     process_file(full_path, collection, progress_prefix=progress_prefix)
                     # 移动到归档夹
                     os.rename(full_path, os.path.join(ARCHIVE, file))
-                print("\n当前所有文件已分析完成！您可以将新的待审计文件放入 inbox 目录中继续分析。\n")
-            time.sleep(3)
+                print("\n当前所有文件已分析完成！您可以将新的待审计文件放入 inbox 目录中继续分析，或输入 quit 并按回车退出脚本。\n")
+            if check_exit_or_sleep(3.0):
+                print("\n检测到退出指令，自动化工作流已安全退出。")
+                break
         except KeyboardInterrupt:
             print("\n自动化工作流已被用户终止退出。")
             break
         except Exception as e:
             print(f"轮询过程发生异常: {e}")
-            time.sleep(3)
+            if check_exit_or_sleep(3.0):
+                break
