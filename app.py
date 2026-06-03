@@ -415,7 +415,8 @@ if __name__ == "__main__":
                     process_file(full_path, collection, progress_prefix=progress_prefix)
                     # 移动到归档夹
                     os.rename(full_path, os.path.join(ARCHIVE, file))
-                print("\n当前所有文件已分析完成！您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
+                print("\n当前所有文件已分析完成！审计结果已生成至 output 目录，且 inbox 中的原文件已全部移至 archive 目录归档。")
+                print("您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
             if check_exit_or_sleep(3.0):
                 print("\n检测到 ESC 键，自动化工作流已安全退出。")
                 break
