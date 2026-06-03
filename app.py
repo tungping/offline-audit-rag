@@ -3,6 +3,8 @@ import json
 import time
 import sys
 import select
+import termios
+import tty
 import pandas as pd
 import ollama
 import chromadb
@@ -356,18 +358,41 @@ def check_environment():
 
 def check_exit_or_sleep(timeout=3.0):
     """
-    非阻塞检查 sys.stdin 是否有 quit 输入，并在没有输入时睡眠指定的秒数。
-    如果用户输入了 quit，返回 True，否则返回 False。
+    非阻塞检查用户是否按下了 ESC 键，并在没有按下时进行睡眠。
+    在超时时间内轮询 stdin，如果检测到 ESC (ASCII 27)，则返回 True。
     """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        # select.select 轮询 stdin，超时为 0.1 秒
-        r, _, _ = select.select([sys.stdin], [], [], 0.1)
-        if r:
-            line = sys.stdin.readline().strip().lower()
-            if line == 'quit':
-                return True
-        time.sleep(0.1)
+    fd = sys.stdin.fileno()
+    is_tty = os.isatty(fd)
+    
+    if not is_tty:
+        time.sleep(timeout)
+        return False
+
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if rlist:
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':  # ESC 键
+                    # 再次非阻塞检查，判定是否为方向键等 ANSI 序列，防止误触发
+                    r_next, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if not r_next:
+                        return True
+                    else:
+                        # 消费掉后续的 ANSI 序列字符（例如 '[A'）
+                        while True:
+                            rn, _, _ = select.select([sys.stdin], [], [], 0.01)
+                            if rn:
+                                sys.stdin.read(1)
+                            else:
+                                break
+            time.sleep(0.05)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        
     return False
 
 if __name__ == "__main__":
@@ -375,7 +400,7 @@ if __name__ == "__main__":
     print("正在连接本地向量库与初始化知识库...")
     collection = initialize_knowledge_base()
     
-    print("\n本地 RAG 自动化工作流已就绪，正在轮询监听 inbox 文件夹（输入 quit 并回车可随时退出）...")
+    print("\n本地 RAG 自动化工作流已就绪，正在轮询监听 inbox 文件夹（随时可按 ESC 键退出）...")
     while True:
         try:
             files = [f for f in os.listdir(INBOX) if f.endswith('.txt')]
@@ -390,9 +415,9 @@ if __name__ == "__main__":
                     process_file(full_path, collection, progress_prefix=progress_prefix)
                     # 移动到归档夹
                     os.rename(full_path, os.path.join(ARCHIVE, file))
-                print("\n当前所有文件已分析完成！您可以将新的待审计文件放入 inbox 目录中继续分析，或输入 quit 并按回车退出脚本。\n")
+                print("\n当前所有文件已分析完成！您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
             if check_exit_or_sleep(3.0):
-                print("\n检测到退出指令，自动化工作流已安全退出。")
+                print("\n检测到 ESC 键，自动化工作流已安全退出。")
                 break
         except KeyboardInterrupt:
             print("\n自动化工作流已被用户终止退出。")
