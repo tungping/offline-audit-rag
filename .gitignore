@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+vector_store/
+output/
+archive/
+inbox/*.txt
+.gemini/
