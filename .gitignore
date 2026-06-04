@@ -1,23 +1,8 @@
-.venv/
-__pycache__/
-*.pyc
-.DS_Store
-vector_store/
-output/
-archive/
-inbox/*.txt
-inbox/*.wav
-inbox/*.mp3
-inbox/*.flac
-inbox/*.ogg
-inbox/*.m4a
-inbox/*.aac
-inbox/*.wma
-inbox/*.opus
-inbox/*.webm
-inbox/*.amr
-failed/*.txt
-failed/*.wav
-failed/*.mp3
-failed/*.m4a
-.gemini/
+# 默认忽略所有文件和目录
+*
+
+# 排除（保留）以下特定文件
+!app.py
+!transcribe.py
+!README.md
+!.gitignore
