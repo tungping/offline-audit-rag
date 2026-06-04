@@ -105,6 +105,37 @@ EMBEDDING_CONCURRENCY=2 .venv/bin/python app.py
 
 ---
 
+## 🎙️ 音频转文字（可选前置步骤）
+
+如果你的输入是音频文件（会议录音、通话录音等），可以使用内置的转录工具将音频自动转为文字：
+
+```bash
+# 单个文件转录（输出 .txt 自动存入 inbox/，触发审计）
+.venv/bin/python transcribe.py recording.m4a
+
+# 指定语言为中文（默认 auto 自动检测）
+.venv/bin/python transcribe.py meeting.mp3 --language zh
+
+# 批量处理整个目录
+.venv/bin/python transcribe.py ./recordings/
+
+# 自定义输出目录（不自动触发审计）
+.venv/bin/python transcribe.py call.wav --output-dir ./transcripts/
+```
+
+**前置要求**：
+- [ffmpeg](https://formulae.brew.sh/formula/ffmpeg) 已安装（`brew install ffmpeg`）
+- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) 已构建，且 `ggml-medium.bin` 模型已下载
+
+**支持的音频格式**：`.wav`、`.mp3`、`.flac`、`.ogg`（直接处理），`.m4a`、`.aac`、`.wma`、`.opus`、`.webm`、`.amr`、`.3gp`（自动转换后处理）
+
+**完整端到端流程**：
+```
+音频文件 → transcribe.py → inbox/*.txt → app.py 自动审计 → output/
+```
+
+---
+
 ## 📁 目录结构
 
 ```
