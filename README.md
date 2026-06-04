@@ -236,4 +236,4 @@ A：强烈建议显式指定 `WHISPER_LANGUAGE=zh`，这样可以引导模型优
 
 ## 📄 License
 
-MIT
+CC0
