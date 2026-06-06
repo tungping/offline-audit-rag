@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import datetime
 import sys
 import select
 import shutil
@@ -9,6 +10,7 @@ import termios
 import tty
 import queue
 import logging
+import threading
 import pandas as pd
 import ollama
 import chromadb
@@ -46,6 +48,8 @@ RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
 
 # 事件循环与队列
 file_queue = queue.Queue()
+_queued_paths: set = set()
+_queue_lock = threading.Lock()
 POLL_INTERVAL = 0.5  # 键盘检测间隔
 
 # 严密的 SYSTEM PROMPT 模板
@@ -436,7 +440,7 @@ def process_file(file_path, collection, progress_prefix=""):
         df['source_file'] = os.path.basename(file_path)
         
         due_dates = []
-        now = time.time()
+        today = datetime.date.today()
         for p in df['priority']:
             p_lower = str(p).lower()
             if 'high' in p_lower:
@@ -445,7 +449,7 @@ def process_file(file_path, collection, progress_prefix=""):
                 days = 7
             else:
                 days = 5
-            due_dates.append(time.strftime("%Y-%m-%d", time.localtime(now + days * 86400)))
+            due_dates.append((today + datetime.timedelta(days=days)).isoformat())
         df['due_date'] = due_dates
 
         base_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -565,8 +569,14 @@ class InboxFileHandler(FileSystemEventHandler):
 
     def _handle_path(self, path):
         if path.endswith('.txt'):
+            abs_path = os.path.abspath(path)
+            with _queue_lock:
+                if abs_path in _queued_paths:
+                    logging.debug(f"跳过重复文本事件: {os.path.basename(path)}")
+                    return
+                _queued_paths.add(abs_path)
             logging.info(f"检测到新待审文本: {os.path.basename(path)}")
-            file_queue.put(path)
+            file_queue.put(abs_path)
 
 if __name__ == "__main__":
     check_environment()
@@ -591,7 +601,10 @@ if __name__ == "__main__":
     if startup_files:
         logging.info(f"扫描到启动时已存在的待审文件 {len(startup_files)} 个，加入待处理队列。")
         for f in startup_files:
-            file_queue.put(f)
+            abs_f = os.path.abspath(f)
+            with _queue_lock:
+                _queued_paths.add(abs_f)
+            file_queue.put(abs_f)
 
     # 2. 启动 watchdog 监听 inbox 目录
     event_handler = InboxFileHandler()
@@ -605,15 +618,24 @@ if __name__ == "__main__":
                 full_path = file_queue.get()
                 try:
                     if os.path.exists(full_path):
-                        # 对单个文件执行处理
-                        success = process_file(full_path, collection)
+                        try:
+                            # 对单个文件执行处理
+                            success = process_file(full_path, collection)
 
-                        if success:
-                            safe_move(full_path, ARCHIVE)
-                        else:
-                            safe_move(full_path, FAILED)
-                            logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
+                            if success:
+                                safe_move(full_path, ARCHIVE)
+                            else:
+                                safe_move(full_path, FAILED)
+                                logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
+                        except Exception as process_err:
+                            logging.error(f"处理或移动文件 {full_path} 时发生严重错误: {process_err}")
+                            try:
+                                safe_move(full_path, FAILED)
+                            except Exception as move_err:
+                                logging.error(f"无法将已损坏文件移至 failed/ 目录: {move_err}")
                 finally:
+                    with _queue_lock:
+                        _queued_paths.discard(os.path.abspath(full_path))
                     # 无论处理成功/失败/safe_move 本身抛异常，都必须调用 task_done
                     # 否则 queue.join() 将永久阻塞
                     file_queue.task_done()
@@ -624,7 +646,7 @@ if __name__ == "__main__":
                     break
             else:
                 # 队列空闲时轮询检测 ESC
-                if check_exit_or_sleep(3.0):
+                if check_exit_or_sleep(POLL_INTERVAL):
                     logging.info("检测到 ESC 键，正在退出...")
                     break
     except KeyboardInterrupt:

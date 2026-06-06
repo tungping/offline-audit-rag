@@ -22,6 +22,7 @@ import time
 import tty
 import json
 import logging
+import threading
 from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -47,20 +48,21 @@ FAILED_DIR     = os.path.join(BASE_DIR, "failed")
 # ──────────────────────────────────────────────
 # whisper.cpp 配置（支持环境配置与自动寻址）
 # ──────────────────────────────────────────────
-WHISPER_CLI = os.getenv(
+WHISPER_CLI = os.path.expanduser(os.getenv(
     "WHISPER_CLI",
-    shutil.which("whisper-cli") or os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
-)
-WHISPER_LIB_DIR = os.getenv(
+    shutil.which("whisper-cli") or "~/whisper.cpp/build/bin/whisper-cli"
+))
+WHISPER_LIB_DIR = os.path.expanduser(os.getenv(
     "WHISPER_LIB_DIR",
-    os.path.expanduser("~/whisper.cpp/build/src")
-)
-DEFAULT_MODEL = os.getenv(
+    "~/whisper.cpp/build/src"
+))
+DEFAULT_MODEL = os.path.expanduser(os.getenv(
     "WHISPER_MODEL",
-    os.path.expanduser("~/whisper.cpp/models/ggml-medium.bin")
-)
+    "~/whisper.cpp/models/ggml-medium.bin"
+))
 DEFAULT_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "auto")
 DEFAULT_THREADS  = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 4)))
+FILE_READY_TIMEOUT = int(os.getenv("FILE_READY_TIMEOUT", "10"))
 
 # ──────────────────────────────────────────────
 # 格式与事件队列
@@ -79,6 +81,7 @@ POLL_INTERVAL = 0.5  # 空闲键盘检测间隔（秒）
 # 待处理音频队列，以及已入队路径字符串集合（用于防止重复排队）
 file_queue = queue.Queue()
 _queued_paths: set = set()  # 跨线程共享，防止同一文件多次触发
+_queue_lock = threading.Lock()
 
 # ──────────────────────────────────────────────
 # 目录与依赖初始化
@@ -142,7 +145,7 @@ def get_audio_duration(file_path):
     return None
 
 
-def wait_for_file_ready(file_path, timeout=10, stable_interval=1.0):
+def wait_for_file_ready(file_path, timeout=FILE_READY_TIMEOUT, stable_interval=1.0):
     """
     等待文件写入完成：如果在 stable_interval 内文件大小没有变化，则认为写入完成。
     注：macOS 不有 Windows 式文件写锁机制，仅依赖文件大小稳定性判断。
@@ -347,10 +350,11 @@ class AudioFileHandler(FileSystemEventHandler):
         if ext in AUDIO_EXTENSIONS:
             # 防止同一路径被重复排队（watchdog 可能对同一文件触发多次事件）
             abs_path = os.path.abspath(path)
-            if abs_path in _queued_paths:
-                logging.debug(f"跳过重复文件事件: {os.path.basename(path)}")
-                return
-            _queued_paths.add(abs_path)
+            with _queue_lock:
+                if abs_path in _queued_paths:
+                    logging.debug(f"跳过重复文件事件: {os.path.basename(path)}")
+                    return
+                _queued_paths.add(abs_path)
             logging.info(f"检测到新音频文件: {os.path.basename(path)}")
             file_queue.put((abs_path, True))  # (path, needs_wait)
 
@@ -419,7 +423,8 @@ def main():
         logging.info(f"扫描到启动时已存在的音频文件 {len(startup_files)} 个，加入待处理队列。")
         for f in startup_files:
             abs_f = os.path.abspath(f)
-            _queued_paths.add(abs_f)
+            with _queue_lock:
+                _queued_paths.add(abs_f)
             file_queue.put((abs_f, False))  # needs_wait=False，已存在文件无需等待
 
     # 2. 启动 watchdog 监听 recordings 目录
@@ -446,8 +451,9 @@ def main():
                                 logging.warning(f"文件写入不稳定，跳过处理: {file_path}")
                                 continue
                         process_audio_file(file_path)
-                    _queued_paths.discard(os.path.abspath(file_path))  # 处理完成后从去重集合移除
                 finally:
+                    with _queue_lock:
+                        _queued_paths.discard(os.path.abspath(file_path))  # 处理完成后从去重集合移除
                     # 无论处理成功/失败/占用路径存在问题，都必须调用 task_done
                     file_queue.task_done()
 
