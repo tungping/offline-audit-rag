@@ -283,6 +283,11 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
                 retrieved_docs.append(doc)
             else:
                 logging.info(f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}...")
+    if not retrieved_docs:
+        logging.warning(
+            f"RAG 未检索到任何相关合规条款（threshold={RELEVANCE_THRESHOLD}），"
+            "审计将在无参考基准的情况下进行。可适当调高 RELEVANCE_THRESHOLD。"
+        )
     return retrieved_docs
 
 def safe_move(src_path, dest_dir, timestamp_func=None):
@@ -420,7 +425,7 @@ def process_file(file_path, collection, progress_prefix=""):
         }.items():
             if column not in df.columns:
                 df[column] = default
-        df = df.drop_duplicates()
+        df = df.drop_duplicates().reset_index(drop=True)  # reset_index 保证 iterrows 序号连续
 
         df['owner'] = df['owner'].fillna("Unassigned").replace({"": "Unassigned"})
         df['task_name'] = df['task_name'].fillna("未知任务").replace({"": "未知任务"})
@@ -569,13 +574,13 @@ if __name__ == "__main__":
     collection = initialize_knowledge_base()
 
     logging.info("==========================================================")
-    print("🚀  本地 RAG 自动合规审计服务已就绪 (Event-Driven Edition)")
-    print(f"   审计模型 : {AUDIT_MODEL}")
-    print(f"   嵌入模型 : {EMBED_MODEL}")
-    print(f"   语义阈值 : {RELEVANCE_THRESHOLD}")
-    print(f"   监听目录 : inbox/")
-    print("==========================================================")
-    print("按 ESC 键安全退出，按 Ctrl+C 强制退出。\n")
+    logging.info("🚀  本地 RAG 自动合规审计服务已就绪 (Event-Driven Edition)")
+    logging.info(f"   审计模型 : {AUDIT_MODEL}")
+    logging.info(f"   嵌入模型 : {EMBED_MODEL}")
+    logging.info(f"   语义阈值 : {RELEVANCE_THRESHOLD}")
+    logging.info(f"   监听目录 : inbox/")
+    logging.info("==========================================================")
+    logging.info("按 ESC 键安全退出，按 Ctrl+C 强制退出。")
 
     # 1. 扫描启动时已存在的文件并加入队列
     startup_files = sorted(
@@ -598,16 +603,20 @@ if __name__ == "__main__":
         while True:
             if not file_queue.empty():
                 full_path = file_queue.get()
-                if os.path.exists(full_path):
-                    # 对单个文件执行处理
-                    success = process_file(full_path, collection)
-                    
-                    if success:
-                        safe_move(full_path, ARCHIVE)
-                    else:
-                        safe_move(full_path, FAILED)
-                        logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
-                file_queue.task_done()
+                try:
+                    if os.path.exists(full_path):
+                        # 对单个文件执行处理
+                        success = process_file(full_path, collection)
+
+                        if success:
+                            safe_move(full_path, ARCHIVE)
+                        else:
+                            safe_move(full_path, FAILED)
+                            logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
+                finally:
+                    # 无论处理成功/失败/safe_move 本身抛异常，都必须调用 task_done
+                    # 否则 queue.join() 将永久阻塞
+                    file_queue.task_done()
 
                 # 处理完后快速检查退出按键
                 if check_exit_or_sleep(0.1):

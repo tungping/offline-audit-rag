@@ -76,8 +76,9 @@ AUDIO_EXTENSIONS = {
 
 POLL_INTERVAL = 0.5  # 空闲键盘检测间隔（秒）
 
-# 待处理音频队列
+# 待处理音频队列，以及已入队路径字符串集合（用于防止重复排队）
 file_queue = queue.Queue()
+_queued_paths: set = set()  # 跨线程共享，防止同一文件多次触发
 
 # ──────────────────────────────────────────────
 # 目录与依赖初始化
@@ -143,7 +144,8 @@ def get_audio_duration(file_path):
 
 def wait_for_file_ready(file_path, timeout=10, stable_interval=1.0):
     """
-    等待文件写入完成。如果在 stable_interval 内文件大小没有变化，且能够打开，则认为写入完成。
+    等待文件写入完成：如果在 stable_interval 内文件大小没有变化，则认为写入完成。
+    注：macOS 不有 Windows 式文件写锁机制，仅依赖文件大小稳定性判断。
     """
     if not os.path.exists(file_path):
         return False
@@ -153,10 +155,7 @@ def wait_for_file_ready(file_path, timeout=10, stable_interval=1.0):
         try:
             current_size = os.path.getsize(file_path)
             if current_size == last_size and current_size > 0:
-                # 尝试以读写追加模式打开文件，确认没有写锁占用
-                with open(file_path, 'ab'):
-                    pass
-                return True
+                return True  # 大小在 stable_interval 内未变化，认为写入完成
             last_size = current_size
         except Exception:
             pass
@@ -346,9 +345,14 @@ class AudioFileHandler(FileSystemEventHandler):
     def _handle_path(self, path):
         ext = os.path.splitext(path)[1].lower()
         if ext in AUDIO_EXTENSIONS:
-            # 避免对同一文件重复排队
+            # 防止同一路径被重复排队（watchdog 可能对同一文件触发多次事件）
+            abs_path = os.path.abspath(path)
+            if abs_path in _queued_paths:
+                logging.debug(f"跳过重复文件事件: {os.path.basename(path)}")
+                return
+            _queued_paths.add(abs_path)
             logging.info(f"检测到新音频文件: {os.path.basename(path)}")
-            file_queue.put(path)
+            file_queue.put((abs_path, True))  # (path, needs_wait)
 
 
 # ──────────────────────────────────────────────
@@ -405,7 +409,7 @@ def main():
     print("==========================================================")
     print("按 ESC 键安全退出，按 Ctrl+C 强制退出。\n")
 
-    # 1. 扫描启动时已存在的文件并加入队列
+    # 1. 扫描启动时已存在的文件并加入队列（needs_wait=False 跳过写入检测）
     startup_files = sorted(
         os.path.join(RECORDINGS_DIR, f)
         for f in os.listdir(RECORDINGS_DIR)
@@ -414,7 +418,9 @@ def main():
     if startup_files:
         logging.info(f"扫描到启动时已存在的音频文件 {len(startup_files)} 个，加入待处理队列。")
         for f in startup_files:
-            file_queue.put(f)
+            abs_f = os.path.abspath(f)
+            _queued_paths.add(abs_f)
+            file_queue.put((abs_f, False))  # needs_wait=False，已存在文件无需等待
 
     # 2. 启动 watchdog 监听 recordings 目录
     event_handler = AudioFileHandler()
@@ -426,15 +432,24 @@ def main():
         while True:
             # 如果队列中有文件，提取并处理
             if not file_queue.empty():
-                file_path = file_queue.get()
-                if os.path.exists(file_path):
-                    # 等待写入稳定
-                    logging.info(f"等待文件写入完成... {os.path.basename(file_path)}")
-                    if wait_for_file_ready(file_path):
+                item = file_queue.get()
+                # 公展内容：(path, needs_wait) 或旧格式纯字符串
+                if isinstance(item, tuple):
+                    file_path, needs_wait = item
+                else:
+                    file_path, needs_wait = item, False
+                try:
+                    if os.path.exists(file_path):
+                        if needs_wait:
+                            logging.info(f"等待文件写入完成... {os.path.basename(file_path)}")
+                            if not wait_for_file_ready(file_path):
+                                logging.warning(f"文件写入不稳定，跳过处理: {file_path}")
+                                continue
                         process_audio_file(file_path)
-                    else:
-                        logging.warning(f"文件写入不稳定，跳过处理: {file_path}")
-                file_queue.task_done()
+                    _queued_paths.discard(os.path.abspath(file_path))  # 处理完成后从去重集合移除
+                finally:
+                    # 无论处理成功/失败/占用路径存在问题，都必须调用 task_done
+                    file_queue.task_done()
 
                 # 每处理完一个文件，检查一次退出按键
                 if check_exit_or_sleep(0.1):
