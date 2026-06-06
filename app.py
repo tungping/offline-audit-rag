@@ -7,11 +7,26 @@ import shutil
 import asyncio
 import termios
 import tty
+import queue
+import logging
 import pandas as pd
 import ollama
 import chromadb
+from dotenv import load_dotenv
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
-# 配置本地物理路径
+# ──────────────────────────────────────────────
+# 环境初始化与日志
+# ──────────────────────────────────────────────
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(BASE_DIR, "inbox")
 OUTPUT = os.path.join(BASE_DIR, "output")
@@ -20,16 +35,26 @@ FAILED = os.path.join(BASE_DIR, "failed")
 CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
 VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
 
+# 并发与重试
 EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "2"))
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 
-# 严密的 SYSTEM PROMPT 模板，包含动态嵌入的合规标准上下文
+# 模型配置
+AUDIT_MODEL = os.getenv("AUDIT_MODEL", "qwen3.5:9b")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
+
+# 事件循环与队列
+file_queue = queue.Queue()
+POLL_INTERVAL = 0.5  # 键盘检测间隔
+
+# 严密的 SYSTEM PROMPT 模板
 SYSTEM_PROMPT_TEMPLATE = """You are an expert PMO (Project Management Office) Compliance Auditor and Technical Operations Analyst. Your job is to analyze messy, unformatted technical meeting notes or logs, perform a strict compliance check against standard software engineering workflows using the provided compliance standards, and extract actionable tasks.
 
 ### 核心合规参考标准（必须作为审计违规判断与任务抽取的唯一基准）：
 {compliance_context}
 
-### 审计审计与任务提取规则：
+### 审计与任务提取规则：
 STEP 1: Analyze the input text for any project compliance violations based on the reference standard, such as:
 - Deploying directly to production without testing, QA approval, or Peer Code Review.
 - Unauthorized scope changes (scope creep) without updating documentation.
@@ -60,11 +85,9 @@ You MUST reply strictly in the following JSON format. Do not include any markdow
 def count_tokens(text):
     """
     原生轻量级 Token 估算：
-    中文字符每个算 1 个 Token；英文单词（不含中文字符的词）按空格切分每个算 1 个 Token。
-    修复：避免中文字符被 split() 二次计数。
+    中文字符每个算 1 个 Token；英文单词按空格切分每个算 1 个 Token。
     """
     chinese_count = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
-    # 只统计不包含任何中文字符的纯英文/数字词
     english_words = len([
         w for w in text.split()
         if w and not any('\u4e00' <= c <= '\u9fff' for c in w)
@@ -96,7 +119,6 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
         for part in parts:
             part_size = count_tokens(part)
             if part_size > chunk_size:
-                # 若单部分超长，递归下一级分隔符
                 if current_chunk:
                     chunks.append(sep.join(current_chunk))
                     current_chunk = []
@@ -115,10 +137,8 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
             chunks.append(sep.join(current_chunk))
         return chunks
 
-    # 基础语义切片
     raw_chunks = split(text, separators)
 
-    # 结合 overlap 机制进行合并
     merged_chunks = []
     current_group = []
     current_size = 0
@@ -132,7 +152,6 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
             if current_group:
                 merged_chunks.append("\n".join(current_group))
 
-            # 计算重叠区保留部分
             overlap_group = []
             overlap_size = 0
             for c in reversed(current_group):
@@ -152,7 +171,7 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
 
 async def _fetch_embeddings_async(documents):
     """
-    使用有限并发批量获取文档向量，避免本地 Ollama 在大批量初始化时过载。
+    使用有限并发批量获取文档向量。
     """
     client = ollama.AsyncClient()
     semaphore = asyncio.Semaphore(max(1, EMBEDDING_CONCURRENCY))
@@ -161,7 +180,7 @@ async def _fetch_embeddings_async(documents):
         async with semaphore:
             for attempt in range(EMBEDDING_MAX_RETRIES):
                 try:
-                    res = await client.embeddings(model="nomic-embed-text", prompt=doc)
+                    res = await client.embeddings(model=EMBED_MODEL, prompt=doc)
                     return res['embedding']
                 except Exception:
                     if attempt == EMBEDDING_MAX_RETRIES - 1:
@@ -178,15 +197,13 @@ def initialize_knowledge_base():
     collection = client.get_or_create_collection(name="compliance_rules")
 
     if collection.count() > 0:
-        print("本地向量数据库已检测到合规数据，跳过向量库构建。")
+        logging.info("本地向量数据库已检测到合规数据，跳过向量库构建。")
         return collection
 
-    print("本地向量数据库为空，开始读取合规手册...")
+    logging.info("本地向量数据库为空，开始读取合规手册...")
 
-    # 获取需要处理的合规文本文件（优化：sorted 保证加载顺序稳定）
     files = sorted([f for f in os.listdir(CONFIG_DIR) if f.endswith('.txt')])
     if not files:
-        # 自动生成默认的合规规范文件，确保首次运行时零配置上手
         default_rule_path = os.path.join(CONFIG_DIR, "standard_pmo_compliance_rules.txt")
         default_rules = """标准研发及发布合规规范手册（PMO Compliance Standard）：
 
@@ -209,7 +226,7 @@ def initialize_knowledge_base():
         with open(default_rule_path, 'w', encoding='utf-8') as f_def:
             f_def.write(default_rules)
         files = [os.path.basename(default_rule_path)]
-        print(f"已为您自动生成默认合规规范文本: {default_rule_path}")
+        logging.info(f"已为您自动生成默认合规规范文本: {default_rule_path}")
 
     documents = []
     ids = []
@@ -228,12 +245,11 @@ def initialize_knowledge_base():
                 chunk_counter += 1
 
     if not documents:
-        print("未提取到任何有效切片文本。")
+        logging.warning("未提取到任何有效切片文本。")
         return collection
 
-    print(f"已生成 {len(documents)} 个合规切片，正在并发调用 nomic-embed-text 写入本地 ChromaDB...")
+    logging.info(f"已生成 {len(documents)} 个合规切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB...")
 
-    # 优化：并发异步获取所有向量，替代串行逐个请求
     embeddings = asyncio.run(_fetch_embeddings_async(documents))
 
     collection.add(
@@ -241,31 +257,38 @@ def initialize_knowledge_base():
         documents=documents,
         embeddings=embeddings
     )
-    print("向量数据库构建成功！数据已持久化。")
+    logging.info("向量数据库构建成功！数据已持久化。")
     return collection
 
 def retrieve_relevant_context(collection, query_text, top_k=3):
     """
-    语义检索网关：将查询日志转为向量并在本地 collection 中检索出最相关的 top_k 条合规基准
+    语义检索网关：将查询日志转为向量并在本地 collection 中检索出最相关的 top_k 条合规基准，
+    利用 RELEVANCE_THRESHOLD 进行相关度度量过滤。
     """
-    res = ollama.embeddings(model="nomic-embed-text", prompt=query_text)
+    res = ollama.embeddings(model=EMBED_MODEL, prompt=query_text)
     query_embedding = res['embedding']
 
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=top_k
+        n_results=top_k,
+        include=["documents", "distances"]
     )
 
     retrieved_docs = []
     if results and 'documents' in results and results['documents']:
-        retrieved_docs = results['documents'][0]
+        docs = results['documents'][0]
+        distances = results.get('distances', [[]])[0]
+        for doc, dist in zip(docs, distances):
+            if dist < RELEVANCE_THRESHOLD:
+                retrieved_docs.append(doc)
+            else:
+                logging.info(f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}...")
     return retrieved_docs
 
 def safe_move(src_path, dest_dir, timestamp_func=None):
     """
     将文件安全移动至指定目录：
-    - 使用 shutil.move() 替代 os.rename()，兼容跨文件系统移动。
-    - 若目标已有同名文件，自动追加时间戳后缀避免静默覆盖。
+    - 若目标已有同名文件，自动追加时间戳后缀避免覆盖。
     """
     if timestamp_func is None:
         timestamp_func = lambda: time.strftime("%Y%m%d_%H%M%S")
@@ -287,7 +310,7 @@ def safe_move(src_path, dest_dir, timestamp_func=None):
 
 def extract_json_object(response_text):
     """
-    从模型输出中提取第一个完整 JSON 对象，兼容 think 标签、代码块和前后说明文字。
+    从模型输出中提取第一个完整 JSON 对象，兼容 think 标签和代码块。
     """
     text = response_text.strip()
     if "</think>" in text:
@@ -330,7 +353,7 @@ def extract_json_object(response_text):
 
 def markdown_table_cell(value):
     """
-    转义 Markdown 表格单元格，避免模型输出中的竖线或换行破坏表格结构。
+    转义 Markdown 表格单元格。
     """
     return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
@@ -340,7 +363,6 @@ def markdown_quote_block(text):
 def process_file(file_path, collection, progress_prefix=""):
     """
     对单个文件执行完整的 RAG 审计流程。
-    返回 True 表示处理成功并已写入报告，返回 False 表示处理失败（文件不应被归档）。
     """
     full_response = ""
     try:
@@ -355,15 +377,15 @@ def process_file(file_path, collection, progress_prefix=""):
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(compliance_context=compliance_context)
 
         # 3. 本地大模型推理并流式监听
-        print(f"  提示：模型分析中，如需强制退出请按 Ctrl+C")
+        logging.info(f"大模型分析中 (模型: {AUDIT_MODEL})，如需强制退出请按 Ctrl+C")
         response_stream = ollama.generate(
-            model='qwen3.5:9b',  # 本地运行的大模型大脑
+            model=AUDIT_MODEL,
             prompt=content,
             system=system_prompt,
             options={
                 "temperature": 0.1,
-                "num_ctx": 8192,  # 增大上下文窗口到 8K，避免推理链条长时被截断
-                "num_keep": 0     # 防止 KV cache 污染，保证多次推理的格式稳定
+                "num_ctx": 8192,
+                "num_keep": 0
             },
             stream=True
         )
@@ -398,16 +420,29 @@ def process_file(file_path, collection, progress_prefix=""):
         }.items():
             if column not in df.columns:
                 df[column] = default
-        df = df.drop_duplicates()  # 清除偶发重复任务
+        df = df.drop_duplicates()
 
-        # 字段空值与默认值修正（修复：使用字典形式的 replace 保证跨版本兼容）
         df['owner'] = df['owner'].fillna("Unassigned").replace({"": "Unassigned"})
         df['task_name'] = df['task_name'].fillna("未知任务").replace({"": "未知任务"})
         df['priority'] = df['priority'].fillna("Medium").replace({"": "Medium"})
+        df['audit_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 为 Jira 兼容拓展字段
+        df['source_file'] = os.path.basename(file_path)
+        
+        due_dates = []
+        now = time.time()
+        for p in df['priority']:
+            p_lower = str(p).lower()
+            if 'high' in p_lower:
+                days = 3
+            elif 'low' in p_lower:
+                days = 7
+            else:
+                days = 5
+            due_dates.append(time.strftime("%Y-%m-%d", time.localtime(now + days * 86400)))
+        df['due_date'] = due_dates
 
-        df['audit_time'] = time.strftime("%Y-%m-%d %H_%M_%S")
-
-        # 命名格式：被处理的文件名+处理结束时的时间 (YYYY-MM-DD_HH:mm)
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
 
@@ -434,30 +469,42 @@ def process_file(file_path, collection, progress_prefix=""):
 ## 三、提取指派的任务看板
 根据对会议内容的解析，自动生成的结构化处理任务如下：
 
-| 序号 | 任务名称 | 负责人 | 优先级 | 审计生成时间 |
-| :--- | :--- | :--- | :--- | :--- |
+| 序号 | 任务名称 | 负责人 | 优先级 | 截止日期 | 审计生成时间 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
 """
         for i, row in df.iterrows():
             md_content += (
                 f"| {i+1} | {markdown_table_cell(row.get('task_name'))} | "
                 f"{markdown_table_cell(row.get('owner'))} | "
                 f"{markdown_table_cell(row.get('priority'))} | "
+                f"{markdown_table_cell(row.get('due_date'))} | "
                 f"{markdown_table_cell(row.get('audit_time'))} |\n"
             )
+
+        # 附加原始文本摘要
+        excerpt = content[:500] + ("..." if len(content) > 500 else "")
+        md_content += f"""
+## 四、会议原始文本摘要
+以下为本次审计的原始输入片段（截取前 500 字）：
+
+```text
+{excerpt}
+```
+"""
 
         # 保存 Markdown 报告
         md_path = os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md")
         with open(md_path, 'w', encoding='utf-8') as f_md:
             f_md.write(md_content)
 
-        print(f"工作流【{os.path.basename(file_path)}】处理成功！文件已生成至 output 目录。")
-        return True  # 明确返回成功标志，主循环凭此决定是否归档
+        logging.info(f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。")
+        return True
 
     except Exception as e:
-        print(f"文件处理失败: {e}")
+        logging.exception(f"文件处理失败: {e}")
         if full_response:
-            print(f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------")
-        return False  # 返回失败标志，主循环不会归档此文件
+            logging.error(f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------")
+        return False
 
 # 检查并自动构建文件夹环境
 def check_environment():
@@ -467,8 +514,7 @@ def check_environment():
 
 def check_exit_or_sleep(timeout=3.0):
     """
-    非阻塞检查用户是否按下了 ESC 键，并在没有按下时进行睡眠。
-    在超时时间内轮询 stdin，如果检测到 ESC (ASCII 27)，则返回 True。
+    非阻塞检查用户是否按下了 ESC 键。
     """
     fd = sys.stdin.fileno()
     is_tty = os.isatty(fd)
@@ -486,12 +532,10 @@ def check_exit_or_sleep(timeout=3.0):
             if rlist:
                 ch = sys.stdin.read(1)
                 if ch == '\x1b':  # ESC 键
-                    # 再次非阻塞检查，判定是否为方向键等 ANSI 序列，防止误触发
                     r_next, _, _ = select.select([sys.stdin], [], [], 0.02)
                     if not r_next:
                         return True
                     else:
-                        # 消费掉后续的 ANSI 序列字符（例如 '[A'）
                         while True:
                             rn, _, _ = select.select([sys.stdin], [], [], 0.01)
                             if rn:
@@ -504,50 +548,79 @@ def check_exit_or_sleep(timeout=3.0):
 
     return False
 
+# Watchdog 文件夹事件监听
+class InboxFileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if not event.is_directory:
+            self._handle_path(event.src_path)
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            self._handle_path(event.dest_path)
+
+    def _handle_path(self, path):
+        if path.endswith('.txt'):
+            logging.info(f"检测到新待审文本: {os.path.basename(path)}")
+            file_queue.put(path)
+
 if __name__ == "__main__":
     check_environment()
-    print("正在连接本地向量库与初始化知识库...")
+    logging.info("正在连接本地向量库与初始化知识库...")
     collection = initialize_knowledge_base()
 
-    print("\n本地 RAG 自动化工作流已就绪，正在轮询监听 inbox 文件夹（随时可按 ESC 键退出）...")
-    while True:
-        try:
-            # 优化：sorted() 保证文件处理顺序稳定（字母升序）
-            files = sorted([f for f in os.listdir(INBOX) if f.endswith('.txt')])
-            if files:
-                total_files = len(files)
-                success_count = 0
-                failed_count = 0
-                for idx, file in enumerate(files):
-                    full_path = os.path.join(INBOX, file)
-                    processed_count = idx
-                    pending_count = total_files - idx - 1
-                    progress_prefix = f"[进度: 已分析 {processed_count} 个，待分析 {pending_count} 个] 正在分析: {file}"
+    logging.info("==========================================================")
+    print("🚀  本地 RAG 自动合规审计服务已就绪 (Event-Driven Edition)")
+    print(f"   审计模型 : {AUDIT_MODEL}")
+    print(f"   嵌入模型 : {EMBED_MODEL}")
+    print(f"   语义阈值 : {RELEVANCE_THRESHOLD}")
+    print(f"   监听目录 : inbox/")
+    print("==========================================================")
+    print("按 ESC 键安全退出，按 Ctrl+C 强制退出。\n")
 
-                    success = process_file(full_path, collection, progress_prefix=progress_prefix)
+    # 1. 扫描启动时已存在的文件并加入队列
+    startup_files = sorted(
+        os.path.join(INBOX, f)
+        for f in os.listdir(INBOX)
+        if f.endswith('.txt')
+    )
+    if startup_files:
+        logging.info(f"扫描到启动时已存在的待审文件 {len(startup_files)} 个，加入待处理队列。")
+        for f in startup_files:
+            file_queue.put(f)
 
-                    # 处理成功 -> 归档至 archive；失败 -> 隔离至 failed，不再重试
+    # 2. 启动 watchdog 监听 inbox 目录
+    event_handler = InboxFileHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path=INBOX, recursive=False)
+    observer.start()
+
+    try:
+        while True:
+            if not file_queue.empty():
+                full_path = file_queue.get()
+                if os.path.exists(full_path):
+                    # 对单个文件执行处理
+                    success = process_file(full_path, collection)
+                    
                     if success:
                         safe_move(full_path, ARCHIVE)
-                        success_count += 1
                     else:
                         safe_move(full_path, FAILED)
-                        failed_count += 1
-                        print(f"文件【{file}】解析失败，已移至 failed 目录隔离，请人工检查后再决定是否重新投入 inbox。")
+                        logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
+                file_queue.task_done()
 
-                    if check_exit_or_sleep(0.1):
-                        print("\n检测到 ESC 键，当前文件已处理完成，自动化工作流已安全退出。")
-                        sys.exit(0)
-
-                print(f"\n当前批次已处理完成：成功 {success_count} 个，失败 {failed_count} 个。")
-                print("您可以将新的待审计文件放入 inbox 目录中继续分析，或按 ESC 键退出脚本。\n")
-            if check_exit_or_sleep(3.0):
-                print("\n检测到 ESC 键，自动化工作流已安全退出。")
-                break
-        except KeyboardInterrupt:
-            print("\n自动化工作流已被用户终止退出。")
-            break
-        except Exception as e:
-            print(f"轮询过程发生异常: {e}")
-            if check_exit_or_sleep(3.0):
-                break
+                # 处理完后快速检查退出按键
+                if check_exit_or_sleep(0.1):
+                    logging.info("检测到 ESC 键，正在退出...")
+                    break
+            else:
+                # 队列空闲时轮询检测 ESC
+                if check_exit_or_sleep(3.0):
+                    logging.info("检测到 ESC 键，正在退出...")
+                    break
+    except KeyboardInterrupt:
+        logging.info("收到 Ctrl+C 信号，强制退出。")
+    finally:
+        observer.stop()
+        observer.join()
+        logging.info("合规审计服务已安全关闭。")

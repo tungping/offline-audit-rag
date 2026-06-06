@@ -1,0 +1,13 @@
+【研发发布合规管理规范 V2.1】
+
+1. 核心发布流程约束：
+   - 所有代码修改必须在独立的 Feature 分支进行，严禁直接向 main 或 master 分支提交代码。
+   - 代码合并前必须在 GitLab/GitHub 上发起 Pull Request (PR) 或 Merge Request (MR)。
+   - 任何 PR/MR 必须通过至少一名资深工程师的同行代码评审（Peer Code Review）方可合并。
+
+2. 环境与部署合规：
+   - 严禁从开发人员本地环境（Local Environment）使用命令行或手动脚本直接向生产集群（Production Cluster）部署任何镜像或服务。
+   - 所有线上发布必须通过标准的 CI/CD 流水线（自动化测试 -> Staging环境验证 -> QA签发 -> 生产环境滚动更新）进行。
+
+3. 紧急发布红线（例外条款）：
+   - 若发生重大线上 Bug 需紧急热修复（Hotfix），必须由技术负责人（Tech Lead）口头或书面授权，且在 Bug 修复后 24 小时内，必须补齐补丁代码的 Code Review 及事故复盘报告。

@@ -1,8 +1,19 @@
-# 默认忽略所有文件和目录
-*
+# 运行时生成的目录（内容大/敏感）
+vector_store/
+archive/
+failed/
+inbox/
+recordings/
+output/
 
-# 排除（保留）以下特定文件
-!app.py
-!transcribe.py
-!README.md
-!.gitignore
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# 本地环境变量配置
+.env
