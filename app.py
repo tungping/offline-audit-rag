@@ -48,7 +48,7 @@ RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
 
 # 事件循环与队列
 file_queue = queue.Queue()
-_queued_paths: set = set()
+_queued_paths: set[str] = set()
 _queue_lock = threading.Lock()
 POLL_INTERVAL = 0.5  # 键盘检测间隔
 
@@ -469,10 +469,18 @@ def process_file(file_path, collection, progress_prefix=""):
 - **事件审计总结**: *{data['audit_summary']}*
 
 ## 二、RAG 语义匹配合规基准条款
-在本次审计中，语义数据库成功为您提取了最相近的 {len(retrieved_docs)} 条合规基线规范：
 """
-        for i, doc in enumerate(retrieved_docs):
-            md_content += f"\n> **参考规范 {i+1}**:\n{markdown_quote_block(doc)}\n"
+        if retrieved_docs:
+            md_content += f"在本次审计中，语义数据库成功为您提取了最相近的 {len(retrieved_docs)} 条合规基线规范：\n"
+            for i, doc in enumerate(retrieved_docs):
+                md_content += f"\n> **参考规范 {i+1}**:\n{markdown_quote_block(doc)}\n"
+        else:
+            md_content += (
+                f"> ⚠️ **警告**：RAG 语义检索未命中任何合规条款（当前阈值 "
+                f"`RELEVANCE_THRESHOLD={RELEVANCE_THRESHOLD}`）。\n"
+                "> 本次审计在**无合规参考基准**的情况下完成，结论仅供参考。\n"
+                "> 建议适当调高 `.env` 中的 `RELEVANCE_THRESHOLD` 或补充合规手册内容。\n"
+            )
 
         md_content += """
 ## 三、提取指派的任务看板
@@ -521,7 +529,7 @@ def check_environment():
     for d in dirs:
         os.makedirs(d, exist_ok=True)
 
-def check_exit_or_sleep(timeout=3.0):
+def check_exit_or_sleep(timeout=POLL_INTERVAL):
     """
     非阻塞检查用户是否按下了 ESC 键。
     """

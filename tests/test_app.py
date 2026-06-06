@@ -111,6 +111,47 @@ class AppTests(unittest.TestCase):
                     self.assertIn("四、会议原始文本摘要", md_text)
                     self.assertIn("张三昨天直接把代码 push 到了 master", md_text)
 
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
+    def test_process_file_with_no_rag_results(self, mock_generate, mock_embeddings):
+        """RAG 全部低于阈值时，审计应仍正常完成，Markdown 报告包含警告。"""
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+
+        mock_stream = [
+            {'response': '{"compliance_risk": "低", "audit_summary": "无违规", "tasks": []}'},
+        ]
+        mock_generate.return_value = mock_stream
+
+        # 所有距离均超过阈值（默认 0.5），模拟零命中
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['某合规条款']],
+            'distances': [[0.9]]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+
+            with mock.patch('app.OUTPUT', test_output):
+                test_file = os.path.join(tmp_dir, "empty_rag.txt")
+                with open(test_file, 'w', encoding='utf-8') as f:
+                    f.write("本次会议流程正常，无异常事项。")
+
+                success = app.process_file(test_file, mock_collection)
+
+                self.assertTrue(success)
+
+                out_files = os.listdir(test_output)
+                md_file = [f for f in out_files if f.endswith('.md')][0]
+
+                with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
+                    md_text = f_md.read()
+                    # 验证 MD 报告包含 RAG 零结果警告
+                    self.assertIn("⚠️", md_text)
+                    self.assertIn("RELEVANCE_THRESHOLD", md_text)
+                    self.assertNotIn("参考规范 1", md_text)
+
 
 if __name__ == "__main__":
     unittest.main()

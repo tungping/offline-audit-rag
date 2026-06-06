@@ -48,10 +48,9 @@ FAILED_DIR     = os.path.join(BASE_DIR, "failed")
 # ──────────────────────────────────────────────
 # whisper.cpp 配置（支持环境配置与自动寻址）
 # ──────────────────────────────────────────────
-WHISPER_CLI = os.path.expanduser(os.getenv(
-    "WHISPER_CLI",
-    shutil.which("whisper-cli") or "~/whisper.cpp/build/bin/whisper-cli"
-))
+WHISPER_CLI = os.path.expanduser(
+    os.getenv("WHISPER_CLI") or shutil.which("whisper-cli") or "~/whisper.cpp/build/bin/whisper-cli"
+)
 WHISPER_LIB_DIR = os.path.expanduser(os.getenv(
     "WHISPER_LIB_DIR",
     "~/whisper.cpp/build/src"
@@ -80,7 +79,7 @@ POLL_INTERVAL = 0.5  # 空闲键盘检测间隔（秒）
 
 # 待处理音频队列，以及已入队路径字符串集合（用于防止重复排队）
 file_queue = queue.Queue()
-_queued_paths: set = set()  # 跨线程共享，防止同一文件多次触发
+_queued_paths: set[str] = set()  # 跨线程共享，防止同一文件多次触发
 _queue_lock = threading.Lock()
 
 # ──────────────────────────────────────────────
@@ -438,7 +437,7 @@ def main():
             # 如果队列中有文件，提取并处理
             if not file_queue.empty():
                 item = file_queue.get()
-                # 公展内容：(path, needs_wait) 或旧格式纯字符串
+                # 兼容旧格式：(path, needs_wait) 元组或纯字符串
                 if isinstance(item, tuple):
                     file_path, needs_wait = item
                 else:
