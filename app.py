@@ -1,23 +1,24 @@
-import os
-import json
-import time
+import asyncio
 import datetime
-import sys
+import json
+import logging
+import os
+import queue
 import select
 import shutil
-import asyncio
+import sys
 import termios
-import tty
-import queue
-import logging
 import threading
+import time
+import tty
 from typing import Any, cast
-import pandas as pd
-import ollama
+
 import chromadb
+import ollama
+import pandas as pd
 from dotenv import load_dotenv
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 # ──────────────────────────────────────────────
 # 环境初始化与日志
@@ -27,7 +28,7 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -87,17 +88,18 @@ You MUST reply strictly in the following JSON format. Do not include any markdow
   ]
 }}"""
 
+
 def count_tokens(text):
     """
     原生轻量级 Token 估算：
     中文字符每个算 1 个 Token；英文单词按空格切分每个算 1 个 Token。
     """
-    chinese_count = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
-    english_words = len([
-        w for w in text.split()
-        if w and not any('\u4e00' <= c <= '\u9fff' for c in w)
-    ])
+    chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    english_words = len(
+        [w for w in text.split() if w and not any("\u4e00" <= c <= "\u9fff" for c in w)]
+    )
     return chinese_count + english_words
+
 
 def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
     """
@@ -112,7 +114,7 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
         sep = seps[0]
         if sep == "":
             return [
-                text_to_split[i:i + chunk_size]
+                text_to_split[i : i + chunk_size]
                 for i in range(0, len(text_to_split), chunk_size)
             ]
 
@@ -130,9 +132,14 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
                     current_size = 0
                 sub_parts = split(part, seps[1:])
                 chunks.extend(sub_parts)
-            elif current_size + part_size + (count_tokens(sep) if current_chunk else 0) <= chunk_size:
+            elif (
+                current_size + part_size + (count_tokens(sep) if current_chunk else 0)
+                <= chunk_size
+            ):
                 current_chunk.append(part)
-                current_size += part_size + (count_tokens(sep) if len(current_chunk) > 1 else 0)
+                current_size += part_size + (
+                    count_tokens(sep) if len(current_chunk) > 1 else 0
+                )
             else:
                 if current_chunk:
                     chunks.append(sep.join(current_chunk))
@@ -174,6 +181,7 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
 
     return merged_chunks
 
+
 async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
     """
     使用有限并发批量获取文档向量。
@@ -186,7 +194,7 @@ async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
             for attempt in range(EMBEDDING_MAX_RETRIES):
                 try:
                     res = await client.embeddings(model=EMBED_MODEL, prompt=doc)
-                    return cast(list[float], res['embedding'])
+                    return cast(list[float], res["embedding"])
                 except Exception:
                     if attempt == EMBEDDING_MAX_RETRIES - 1:
                         raise
@@ -195,6 +203,7 @@ async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
 
     results = await asyncio.gather(*(embed_one(doc) for doc in documents))
     return results
+
 
 def initialize_knowledge_base():
     """
@@ -209,9 +218,11 @@ def initialize_knowledge_base():
 
     logging.info("本地向量数据库为空，开始读取合规手册...")
 
-    files = sorted([f for f in os.listdir(CONFIG_DIR) if f.endswith('.txt')])
+    files = sorted([f for f in os.listdir(CONFIG_DIR) if f.endswith(".txt")])
     if not files:
-        default_rule_path = os.path.join(CONFIG_DIR, "standard_pmo_compliance_rules.txt")
+        default_rule_path = os.path.join(
+            CONFIG_DIR, "standard_pmo_compliance_rules.txt"
+        )
         default_rules = """标准研发及发布合规规范手册（PMO Compliance Standard）：
 
 1. 分支开发管理与代码评审规范：
@@ -230,7 +241,7 @@ def initialize_knowledge_base():
    - 任何临时需求或重大业务变更必须先由 PM/PMO 评审，并在 Wiki 或文档库中补充规范文档归档后，方能安排开发排期与任务分配。
    - 紧急故障修复期间必须保持职责清晰分工，防止混乱操作。
 """
-        with open(default_rule_path, 'w', encoding='utf-8') as f_def:
+        with open(default_rule_path, "w", encoding="utf-8") as f_def:
             f_def.write(default_rules)
         files = [os.path.basename(default_rule_path)]
         logging.info(f"已为您自动生成默认合规规范文本: {default_rule_path}")
@@ -241,7 +252,7 @@ def initialize_knowledge_base():
 
     for file in files:
         file_path = os.path.join(CONFIG_DIR, file)
-        with open(file_path, 'r', encoding='utf-8') as f_in:
+        with open(file_path, "r", encoding="utf-8") as f_in:
             text_content = f_in.read()
 
         chunks = recursive_split_text(text_content, chunk_size=500, chunk_overlap=200)
@@ -255,17 +266,16 @@ def initialize_knowledge_base():
         logging.warning("未提取到任何有效切片文本。")
         return collection
 
-    logging.info(f"已生成 {len(documents)} 个合规切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB...")
+    logging.info(
+        f"已生成 {len(documents)} 个合规切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB..."
+    )
 
     embeddings: Any = asyncio.run(_fetch_embeddings_async(documents))
 
-    collection.add(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings
-    )
+    collection.add(ids=ids, documents=documents, embeddings=embeddings)
     logging.info("向量数据库构建成功！数据已持久化。")
     return collection
+
 
 def retrieve_relevant_context(collection, query_text, top_k=3):
     """
@@ -273,23 +283,25 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
     利用 RELEVANCE_THRESHOLD 进行相关度度量过滤。
     """
     res = ollama.embeddings(model=EMBED_MODEL, prompt=query_text)
-    query_embedding = res['embedding']
+    query_embedding = res["embedding"]
 
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
-        include=["documents", "distances"]
+        include=["documents", "distances"],
     )
 
     retrieved_docs = []
-    if results and 'documents' in results and results['documents']:
-        docs = results['documents'][0]
-        distances = results.get('distances', [[]])[0]
+    if results and "documents" in results and results["documents"]:
+        docs = results["documents"][0]
+        distances = results.get("distances", [[]])[0]
         for doc, dist in zip(docs, distances):
             if dist < RELEVANCE_THRESHOLD:
                 retrieved_docs.append(doc)
             else:
-                logging.info(f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}...")
+                logging.info(
+                    f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}..."
+                )
     if not retrieved_docs:
         logging.warning(
             f"RAG 未检索到任何相关合规条款（threshold={RELEVANCE_THRESHOLD}），"
@@ -297,13 +309,16 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
         )
     return retrieved_docs
 
+
 def safe_move(src_path, dest_dir, timestamp_func=None):
     """
     将文件安全移动至指定目录：
     - 若目标已有同名文件，自动追加时间戳后缀避免覆盖。
     """
     if timestamp_func is None:
-        timestamp_func = lambda: time.strftime("%Y%m%d_%H%M%S")
+        def default_timestamp():
+            return time.strftime("%Y%m%d_%H%M%S")
+        timestamp_func = default_timestamp
 
     filename = os.path.basename(src_path)
     dest_path = os.path.join(dest_dir, filename)
@@ -320,6 +335,7 @@ def safe_move(src_path, dest_dir, timestamp_func=None):
     shutil.move(src_path, dest_path)
     return dest_path
 
+
 def unique_file_path(file_path):
     """
     返回不会覆盖现有文件的路径：若目标已存在，自动追加递增后缀。
@@ -334,6 +350,7 @@ def unique_file_path(file_path):
         counter += 1
         candidate = f"{base}_{counter}{ext}"
     return candidate
+
 
 def extract_json_object(response_text):
     """
@@ -374,18 +391,27 @@ def extract_json_object(response_text):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return text[start:idx + 1].strip()
+                return text[start : idx + 1].strip()
 
     raise ValueError("模型输出中的 JSON 对象不完整")
+
 
 def markdown_table_cell(value):
     """
     转义 Markdown 表格单元格。
     """
-    return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
 
 def markdown_quote_block(text):
     return "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
+
 
 def process_file(file_path, collection, progress_prefix=""):
     """
@@ -393,15 +419,19 @@ def process_file(file_path, collection, progress_prefix=""):
     """
     full_response = ""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
         # 1. 语义检索合规基准
         retrieved_docs = retrieve_relevant_context(collection, content, top_k=3)
-        compliance_context = "\n\n".join([f"【条款 {i+1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)])
+        compliance_context = "\n\n".join(
+            [f"【条款 {i + 1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)]
+        )
 
         # 2. 组装 SYSTEM PROMPT
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(compliance_context=compliance_context)
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            compliance_context=compliance_context
+        )
 
         # 3. 本地大模型推理并流式监听
         logging.info(f"大模型分析中 (模型: {AUDIT_MODEL})，如需强制退出请按 Ctrl+C")
@@ -409,22 +439,18 @@ def process_file(file_path, collection, progress_prefix=""):
             model=AUDIT_MODEL,
             prompt=content,
             system=system_prompt,
-            options={
-                "temperature": 0.1,
-                "num_ctx": 8192,
-                "num_keep": 0
-            },
-            stream=True
+            options={"temperature": 0.1, "num_ctx": 8192, "num_keep": 0},
+            stream=True,
         )
 
-        spinner = ['|', '/', '-', '\\']
+        spinner = ["|", "/", "-", "\\"]
         spinner_idx = 0
 
         if not progress_prefix:
             progress_prefix = f"正在分析: {os.path.basename(file_path)}"
 
         for chunk in response_stream:
-            token = chunk.get('response', '')
+            token = chunk.get("response", "")
             full_response += token
             print(f"\r{progress_prefix}... {spinner[spinner_idx]} ", end="", flush=True)
             spinner_idx = (spinner_idx + 1) % len(spinner)
@@ -433,65 +459,71 @@ def process_file(file_path, collection, progress_prefix=""):
 
         # 4. 模型响应过滤与容错 JSON 解析
         data = json.loads(extract_json_object(full_response))
-        if not isinstance(data.get('tasks'), list):
-            data['tasks'] = []
-        data.setdefault('compliance_risk', '未知')
-        data.setdefault('audit_summary', '模型未返回审计总结')
+        if not isinstance(data.get("tasks"), list):
+            data["tasks"] = []
+        data.setdefault("compliance_risk", "未知")
+        data.setdefault("audit_summary", "模型未返回审计总结")
 
         # 5. 数据清洗与加工 (CSV/Pandas)
-        df = pd.DataFrame(data['tasks'])
+        df = pd.DataFrame(data["tasks"])
         for column, default in {
-            'task_name': '未知任务',
-            'owner': 'Unassigned',
-            'priority': 'Medium',
+            "task_name": "未知任务",
+            "owner": "Unassigned",
+            "priority": "Medium",
         }.items():
             if column not in df.columns:
                 df[column] = default
-        df = df.drop_duplicates().reset_index(drop=True)  # reset_index 保证 iterrows 序号连续
+        df = df.drop_duplicates().reset_index(
+            drop=True
+        )  # reset_index 保证 iterrows 序号连续
 
-        df['owner'] = df['owner'].fillna("Unassigned").replace({"": "Unassigned"})
-        df['task_name'] = df['task_name'].fillna("未知任务").replace({"": "未知任务"})
-        df['priority'] = df['priority'].fillna("Medium").replace({"": "Medium"})
-        df['audit_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
-        
+        df["owner"] = df["owner"].fillna("Unassigned").replace({"": "Unassigned"})
+        df["task_name"] = df["task_name"].fillna("未知任务").replace({"": "未知任务"})
+        df["priority"] = df["priority"].fillna("Medium").replace({"": "Medium"})
+        df["audit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
         # 为 Jira 兼容拓展字段
-        df['source_file'] = os.path.basename(file_path)
-        
+        df["source_file"] = os.path.basename(file_path)
+
         due_dates = []
         today = datetime.date.today()
-        for p in df['priority']:
+        for p in df["priority"]:
             p_lower = str(p).lower()
-            if 'high' in p_lower:
+            if "high" in p_lower:
                 days = 3
-            elif 'low' in p_lower:
+            elif "low" in p_lower:
                 days = 7
             else:
                 days = 5
             due_dates.append((today + datetime.timedelta(days=days)).isoformat())
-        df['due_date'] = due_dates
+        df["due_date"] = due_dates
 
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
 
         # 保存 CSV 任务指派表
-        csv_path = unique_file_path(os.path.join(OUTPUT, f"{base_name}_{time_suffix}.csv"))
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        csv_path = unique_file_path(
+            os.path.join(OUTPUT, f"{base_name}_{time_suffix}.csv")
+        )
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
         # 6. 生成排版美观的 Markdown 合规审计报告
         md_content = f"""# 自动化合规审计与任务指派报告
 
 ## 一、基础审计信息
 - **被处理文件**: `{os.path.basename(file_path)}`
-- **审计结束时间**: `{time.strftime('%Y-%m-%d %H:%M:%S')}`
-- **合规风险评估**: **{data['compliance_risk']}**
-- **事件审计总结**: *{data['audit_summary']}*
+- **审计结束时间**: `{time.strftime("%Y-%m-%d %H:%M:%S")}`
+- **合规风险评估**: **{data["compliance_risk"]}**
+- **事件审计总结**: *{data["audit_summary"]}*
 
 ## 二、RAG 语义匹配合规基准条款
 """
         if retrieved_docs:
             md_content += f"在本次审计中，语义数据库成功为您提取了最相近的 {len(retrieved_docs)} 条合规基线规范：\n"
             for i, doc in enumerate(retrieved_docs):
-                md_content += f"\n> **参考规范 {i+1}**:\n{markdown_quote_block(doc)}\n"
+                md_content += (
+                    f"\n> **参考规范 {i + 1}**:\n{markdown_quote_block(doc)}\n"
+                )
         else:
             md_content += (
                 f"> ⚠️ **警告**：RAG 语义检索未命中任何合规条款（当前阈值 "
@@ -507,9 +539,9 @@ def process_file(file_path, collection, progress_prefix=""):
 | 序号 | 任务名称 | 负责人 | 优先级 | 截止日期 | 审计生成时间 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 """
-        for i, row in df.iterrows():
+        for idx, (_, row) in enumerate(df.iterrows(), 1):
             md_content += (
-                f"| {i+1} | {markdown_table_cell(row.get('task_name'))} | "
+                f"| {idx} | {markdown_table_cell(row.get('task_name'))} | "
                 f"{markdown_table_cell(row.get('owner'))} | "
                 f"{markdown_table_cell(row.get('priority'))} | "
                 f"{markdown_table_cell(row.get('due_date'))} | "
@@ -528,24 +560,32 @@ def process_file(file_path, collection, progress_prefix=""):
 """
 
         # 保存 Markdown 报告
-        md_path = unique_file_path(os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md"))
-        with open(md_path, 'w', encoding='utf-8') as f_md:
+        md_path = unique_file_path(
+            os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md")
+        )
+        with open(md_path, "w", encoding="utf-8") as f_md:
             f_md.write(md_content)
 
-        logging.info(f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。")
+        logging.info(
+            f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。"
+        )
         return True
 
     except Exception as e:
         logging.exception(f"文件处理失败: {e}")
         if full_response:
-            logging.error(f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------")
+            logging.error(
+                f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------"
+            )
         return False
+
 
 # 检查并自动构建文件夹环境
 def check_environment():
     dirs = [INBOX, OUTPUT, ARCHIVE, FAILED, CONFIG_DIR, VECTOR_STORE_DIR]
     for d in dirs:
         os.makedirs(d, exist_ok=True)
+
 
 def check_exit_or_sleep(timeout=POLL_INTERVAL):
     """
@@ -566,7 +606,7 @@ def check_exit_or_sleep(timeout=POLL_INTERVAL):
             rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
             if rlist:
                 ch = sys.stdin.read(1)
-                if ch == '\x1b':  # ESC 键
+                if ch == "\x1b":  # ESC 键
                     r_next, _, _ = select.select([sys.stdin], [], [], 0.02)
                     if not r_next:
                         return True
@@ -583,6 +623,7 @@ def check_exit_or_sleep(timeout=POLL_INTERVAL):
 
     return False
 
+
 # Watchdog 文件夹事件监听
 class InboxFileHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -594,7 +635,7 @@ class InboxFileHandler(FileSystemEventHandler):
             self._handle_path(event.dest_path)
 
     def _handle_path(self, path):
-        if path.endswith('.txt'):
+        if path.endswith(".txt"):
             abs_path = os.path.abspath(path)
             with _queue_lock:
                 if abs_path in _queued_paths:
@@ -603,6 +644,7 @@ class InboxFileHandler(FileSystemEventHandler):
                 _queued_paths.add(abs_path)
             logging.info(f"检测到新待审文本: {os.path.basename(path)}")
             file_queue.put(abs_path)
+
 
 if __name__ == "__main__":
     check_environment()
@@ -614,18 +656,18 @@ if __name__ == "__main__":
     logging.info(f"   审计模型 : {AUDIT_MODEL}")
     logging.info(f"   嵌入模型 : {EMBED_MODEL}")
     logging.info(f"   语义阈值 : {RELEVANCE_THRESHOLD}")
-    logging.info(f"   监听目录 : inbox/")
+    logging.info("   监听目录 : inbox/")
     logging.info("==========================================================")
     logging.info("按 ESC 键安全退出，按 Ctrl+C 强制退出。")
 
     # 1. 扫描启动时已存在的文件并加入队列
     startup_files = sorted(
-        os.path.join(INBOX, f)
-        for f in os.listdir(INBOX)
-        if f.endswith('.txt')
+        os.path.join(INBOX, f) for f in os.listdir(INBOX) if f.endswith(".txt")
     )
     if startup_files:
-        logging.info(f"扫描到启动时已存在的待审文件 {len(startup_files)} 个，加入待处理队列。")
+        logging.info(
+            f"扫描到启动时已存在的待审文件 {len(startup_files)} 个，加入待处理队列。"
+        )
         for f in startup_files:
             abs_f = os.path.abspath(f)
             with _queue_lock:
@@ -652,13 +694,19 @@ if __name__ == "__main__":
                                 safe_move(full_path, ARCHIVE)
                             else:
                                 safe_move(full_path, FAILED)
-                                logging.warning(f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。")
+                                logging.warning(
+                                    f"文件【{os.path.basename(full_path)}】审计失败，已移至 failed/ 目录。"
+                                )
                         except Exception as process_err:
-                            logging.error(f"处理或移动文件 {full_path} 时发生严重错误: {process_err}")
+                            logging.error(
+                                f"处理或移动文件 {full_path} 时发生严重错误: {process_err}"
+                            )
                             try:
                                 safe_move(full_path, FAILED)
                             except Exception as move_err:
-                                logging.error(f"无法将已损坏文件移至 failed/ 目录: {move_err}")
+                                logging.error(
+                                    f"无法将已损坏文件移至 failed/ 目录: {move_err}"
+                                )
                 finally:
                     with _queue_lock:
                         _queued_paths.discard(os.path.abspath(full_path))

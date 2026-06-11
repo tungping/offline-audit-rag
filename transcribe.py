@@ -10,6 +10,8 @@ transcribe.py — 离线音频自动转文字工具
   - 转录失败：音频移至 failed/ 隔离，等待人工处置
 """
 
+import json
+import logging
 import os
 import queue
 import select
@@ -18,14 +20,13 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import tty
-import json
-import logging
-import threading
+
 from dotenv import load_dotenv
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 # ──────────────────────────────────────────────
 # 初始化环境与日志
@@ -35,32 +36,32 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
-INBOX_DIR      = os.path.join(BASE_DIR, "inbox")
-ARCHIVE_DIR    = os.path.join(BASE_DIR, "archive")
-FAILED_DIR     = os.path.join(BASE_DIR, "failed")
+INBOX_DIR = os.path.join(BASE_DIR, "inbox")
+ARCHIVE_DIR = os.path.join(BASE_DIR, "archive")
+FAILED_DIR = os.path.join(BASE_DIR, "failed")
 
 # ──────────────────────────────────────────────
 # whisper.cpp 配置（支持环境配置与自动寻址）
 # ──────────────────────────────────────────────
 WHISPER_CLI = os.path.expanduser(
-    os.getenv("WHISPER_CLI") or shutil.which("whisper-cli") or "~/whisper.cpp/build/bin/whisper-cli"
+    os.getenv("WHISPER_CLI")
+    or shutil.which("whisper-cli")
+    or "~/whisper.cpp/build/bin/whisper-cli"
 )
-WHISPER_LIB_DIR = os.path.expanduser(os.getenv(
-    "WHISPER_LIB_DIR",
-    "~/whisper.cpp/build/src"
-))
-DEFAULT_MODEL = os.path.expanduser(os.getenv(
-    "WHISPER_MODEL",
-    "~/whisper.cpp/models/ggml-medium.bin"
-))
+WHISPER_LIB_DIR = os.path.expanduser(
+    os.getenv("WHISPER_LIB_DIR", "~/whisper.cpp/build/src")
+)
+DEFAULT_MODEL = os.path.expanduser(
+    os.getenv("WHISPER_MODEL", "~/whisper.cpp/models/ggml-medium.bin")
+)
 DEFAULT_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "auto")
-DEFAULT_THREADS  = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 4)))
+DEFAULT_THREADS = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 4)))
 FILE_READY_TIMEOUT = int(os.getenv("FILE_READY_TIMEOUT", "10"))
 
 
@@ -73,6 +74,7 @@ def resolve_executable(command_or_path):
         return expanded
     return shutil.which(expanded) or expanded
 
+
 # ──────────────────────────────────────────────
 # 格式与事件队列
 # ──────────────────────────────────────────────
@@ -81,10 +83,21 @@ WHISPER_CLI = resolve_executable(WHISPER_CLI)
 WHISPER_NATIVE_FORMATS = {"flac", "mp3", "ogg", "wav"}
 
 AUDIO_EXTENSIONS = {
-    ".wav", ".mp3", ".flac", ".ogg",           # whisper 原生
-    ".m4a", ".aac", ".wma", ".opus", ".webm",  # 常见录音格式
-    ".mp4", ".mkv", ".avi", ".mov",            # 视频容器（含音轨）
-    ".amr", ".3gp",                            # 手机录音常见格式
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".ogg",  # whisper 原生
+    ".m4a",
+    ".aac",
+    ".wma",
+    ".opus",
+    ".webm",  # 常见录音格式
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",  # 视频容器（含音轨）
+    ".amr",
+    ".3gp",  # 手机录音常见格式
 }
 
 POLL_INTERVAL = 0.5  # 空闲键盘检测间隔（秒）
@@ -93,6 +106,7 @@ POLL_INTERVAL = 0.5  # 空闲键盘检测间隔（秒）
 file_queue = queue.Queue()
 _queued_paths: set[str] = set()  # 跨线程共享，防止同一文件多次触发
 _queue_lock = threading.Lock()
+
 
 # ──────────────────────────────────────────────
 # 目录与依赖初始化
@@ -120,7 +134,9 @@ def check_dependencies():
 
     if not os.path.isfile(DEFAULT_MODEL):
         logging.error(f"模型文件不存在: {DEFAULT_MODEL}")
-        logging.error("请运行以下命令下载模型，或在 .env 的 WHISPER_MODEL 中指定正确路径：")
+        logging.error(
+            "请运行以下命令下载模型，或在 .env 的 WHISPER_MODEL 中指定正确路径："
+        )
         logging.error("  cd ~/whisper.cpp && bash models/download-ggml-model.sh medium")
         sys.exit(1)
 
@@ -139,12 +155,18 @@ def get_audio_duration(file_path):
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "json",
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
                 file_path,
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode == 0:
             info = json.loads(result.stdout)
@@ -187,12 +209,17 @@ def convert_to_wav(input_path, tmp_dir):
 
     cmd = [
         "ffmpeg",
-        "-i", input_path,
-        "-ar", "16000",       # 16kHz 采样率
-        "-ac", "1",           # 单声道
-        "-c:a", "pcm_s16le",  # 16-bit PCM
-        "-y",                 # 覆盖已有文件
-        "-loglevel", "warning",
+        "-i",
+        input_path,
+        "-ar",
+        "16000",  # 16kHz 采样率
+        "-ac",
+        "1",  # 单声道
+        "-c:a",
+        "pcm_s16le",  # 16-bit PCM
+        "-y",  # 覆盖已有文件
+        "-loglevel",
+        "warning",
         output_path,
     ]
 
@@ -212,13 +239,18 @@ def run_whisper(audio_path, output_base):
     """
     cmd = [
         WHISPER_CLI,
-        "--model",       DEFAULT_MODEL,
-        "--language",    DEFAULT_LANGUAGE,
-        "--threads",     str(DEFAULT_THREADS),
+        "--model",
+        DEFAULT_MODEL,
+        "--language",
+        DEFAULT_LANGUAGE,
+        "--threads",
+        str(DEFAULT_THREADS),
         "--output-txt",
-        "--output-file", output_base,
+        "--output-file",
+        output_base,
         "--no-prints",
-        "--file",        audio_path,
+        "--file",
+        audio_path,
     ]
 
     env = os.environ.copy()
@@ -234,7 +266,11 @@ def run_whisper(audio_path, output_base):
 
     start = time.time()
     result = subprocess.run(
-        cmd, capture_output=True, text=True, env=env, timeout=3600,
+        cmd,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=3600,
     )
     elapsed = time.time() - start
 
@@ -407,7 +443,7 @@ def check_exit_or_sleep(timeout=POLL_INTERVAL):
             rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
             if rlist:
                 ch = sys.stdin.read(1)
-                if ch == '\x1b':  # ESC
+                if ch == "\x1b":  # ESC
                     r_next, _, _ = select.select([sys.stdin], [], [], 0.02)
                     if not r_next:
                         return True
@@ -436,8 +472,8 @@ def main():
     print(f"   模型   : {os.path.basename(DEFAULT_MODEL)}")
     print(f"   语言   : {DEFAULT_LANGUAGE}")
     print(f"   线程   : {DEFAULT_THREADS}")
-    print(f"   监听   : recordings/")
-    print(f"   输出   : inbox/  （txt 文件）")
+    print("   监听   : recordings/")
+    print("   输出   : inbox/  （txt 文件）")
     print("==========================================================")
     print("按 ESC 键安全退出，按 Ctrl+C 强制退出。\n")
 
@@ -448,7 +484,9 @@ def main():
         if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
     )
     if startup_files:
-        logging.info(f"扫描到启动时已存在的音频文件 {len(startup_files)} 个，加入待处理队列。")
+        logging.info(
+            f"扫描到启动时已存在的音频文件 {len(startup_files)} 个，加入待处理队列。"
+        )
         for f in startup_files:
             abs_f = os.path.abspath(f)
             with _queue_lock:
@@ -474,14 +512,20 @@ def main():
                 try:
                     if os.path.exists(file_path):
                         if needs_wait:
-                            logging.info(f"等待文件写入完成... {os.path.basename(file_path)}")
+                            logging.info(
+                                f"等待文件写入完成... {os.path.basename(file_path)}"
+                            )
                             if not wait_for_file_ready(file_path):
-                                logging.warning(f"文件写入不稳定，跳过处理: {file_path}")
+                                logging.warning(
+                                    f"文件写入不稳定，跳过处理: {file_path}"
+                                )
                                 continue
                         process_audio_file(file_path)
                 finally:
                     with _queue_lock:
-                        _queued_paths.discard(os.path.abspath(file_path))  # 处理完成后从去重集合移除
+                        _queued_paths.discard(
+                            os.path.abspath(file_path)
+                        )  # 处理完成后从去重集合移除
                     # 无论处理成功/失败/占用路径存在问题，都必须调用 task_done
                     file_queue.task_done()
 
