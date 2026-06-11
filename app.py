@@ -11,6 +11,7 @@ import tty
 import queue
 import logging
 import threading
+from typing import Any, cast
 import pandas as pd
 import ollama
 import chromadb
@@ -173,25 +174,27 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
 
     return merged_chunks
 
-async def _fetch_embeddings_async(documents):
+async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
     """
     使用有限并发批量获取文档向量。
     """
     client = ollama.AsyncClient()
     semaphore = asyncio.Semaphore(max(1, EMBEDDING_CONCURRENCY))
 
-    async def embed_one(doc):
+    async def embed_one(doc: str) -> list[float]:
         async with semaphore:
             for attempt in range(EMBEDDING_MAX_RETRIES):
                 try:
                     res = await client.embeddings(model=EMBED_MODEL, prompt=doc)
-                    return res['embedding']
+                    return cast(list[float], res['embedding'])
                 except Exception:
                     if attempt == EMBEDDING_MAX_RETRIES - 1:
                         raise
                     await asyncio.sleep(1 + attempt)
+            raise RuntimeError("Unreachable")
 
-    return await asyncio.gather(*(embed_one(doc) for doc in documents))
+    results = await asyncio.gather(*(embed_one(doc) for doc in documents))
+    return results
 
 def initialize_knowledge_base():
     """
@@ -254,7 +257,7 @@ def initialize_knowledge_base():
 
     logging.info(f"已生成 {len(documents)} 个合规切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB...")
 
-    embeddings = asyncio.run(_fetch_embeddings_async(documents))
+    embeddings: Any = asyncio.run(_fetch_embeddings_async(documents))
 
     collection.add(
         ids=ids,
