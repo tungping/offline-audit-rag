@@ -63,9 +63,21 @@ DEFAULT_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "auto")
 DEFAULT_THREADS  = int(os.getenv("WHISPER_THREADS", str(os.cpu_count() or 4)))
 FILE_READY_TIMEOUT = int(os.getenv("FILE_READY_TIMEOUT", "10"))
 
+
+def resolve_executable(command_or_path):
+    """
+    解析可执行文件配置：支持 PATH 中的命令名，也支持绝对/相对路径和 ~ 路径。
+    """
+    expanded = os.path.expanduser(command_or_path)
+    if os.path.sep in expanded:
+        return expanded
+    return shutil.which(expanded) or expanded
+
 # ──────────────────────────────────────────────
 # 格式与事件队列
 # ──────────────────────────────────────────────
+WHISPER_CLI = resolve_executable(WHISPER_CLI)
+
 WHISPER_NATIVE_FORMATS = {"flac", "mp3", "ogg", "wav"}
 
 AUDIO_EXTENSIONS = {
@@ -98,7 +110,7 @@ def check_dependencies():
         missing.append("ffmpeg（brew install ffmpeg）")
     if not shutil.which("ffprobe"):
         missing.append("ffprobe（随 ffmpeg 一起安装）")
-    if not os.path.isfile(WHISPER_CLI):
+    if not os.path.isfile(WHISPER_CLI) or not os.access(WHISPER_CLI, os.X_OK):
         missing.append(f"whisper-cli（路径: {WHISPER_CLI}）")
     if missing:
         logging.error("缺少以下依赖，请先安装或在 .env 中正确配置：")
@@ -262,6 +274,23 @@ def safe_move(src_path, dest_dir):
     return dest_path
 
 
+def unique_output_base(output_base):
+    """
+    返回不会覆盖 whisper 输出 .txt 的 output_base。
+    whisper-cli 会根据 output_base 生成 .txt 文件，因此这里按 .txt 路径去重。
+    """
+    txt_path = f"{output_base}.txt"
+    if not os.path.exists(txt_path):
+        return output_base
+
+    counter = 1
+    candidate = f"{output_base}_{counter}"
+    while os.path.exists(f"{candidate}.txt"):
+        counter += 1
+        candidate = f"{output_base}_{counter}"
+    return candidate
+
+
 def format_duration(seconds):
     """将秒数格式化为可读字符串。"""
     if seconds is None:
@@ -304,7 +333,7 @@ def process_audio_file(file_path):
             tmp_dir = tempfile.mkdtemp(prefix="transcribe_")
             audio_to_process = convert_to_wav(file_path, tmp_dir)
 
-        output_base = os.path.join(INBOX_DIR, output_name)
+        output_base = unique_output_base(os.path.join(INBOX_DIR, output_name))
         txt_file, elapsed = run_whisper(audio_to_process, output_base)
 
         file_size = os.path.getsize(txt_file)

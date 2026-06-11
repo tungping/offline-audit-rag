@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ import unittest.mock as mock
 import pandas as pd
 
 import app
+import transcribe
 
 
 class AppTests(unittest.TestCase):
@@ -43,6 +45,33 @@ class AppTests(unittest.TestCase):
 
             self.assertEqual(os.path.basename(moved_path), "report_20260603_120000_1.txt")
             self.assertTrue(os.path.exists(moved_path))
+
+    def test_unique_file_path_avoids_overwriting_existing_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "meeting_2026-06-11_10_41.csv"
+            second = Path(tmp) / "meeting_2026-06-11_10_41_1.csv"
+            first.write_text("old", encoding="utf-8")
+            second.write_text("older", encoding="utf-8")
+
+            unique_path = app.unique_file_path(str(first))
+
+            self.assertEqual(os.path.basename(unique_path), "meeting_2026-06-11_10_41_2.csv")
+            self.assertFalse(os.path.exists(unique_path))
+
+    def test_transcribe_unique_output_base_avoids_overwriting_existing_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_base = os.path.join(tmp, "meeting_2026-06-11_10_41")
+            Path(f"{output_base}.txt").write_text("old", encoding="utf-8")
+            Path(f"{output_base}_1.txt").write_text("older", encoding="utf-8")
+
+            unique_base = transcribe.unique_output_base(output_base)
+
+            self.assertEqual(os.path.basename(unique_base), "meeting_2026-06-11_10_41_2")
+            self.assertFalse(os.path.exists(f"{unique_base}.txt"))
+
+    def test_transcribe_resolve_executable_supports_path_command_names(self):
+        self.assertEqual(transcribe.resolve_executable("python"), shutil.which("python") or "python")
+        self.assertEqual(transcribe.resolve_executable("~/bin/custom-tool"), os.path.expanduser("~/bin/custom-tool"))
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')

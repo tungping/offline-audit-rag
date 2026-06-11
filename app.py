@@ -317,6 +317,21 @@ def safe_move(src_path, dest_dir, timestamp_func=None):
     shutil.move(src_path, dest_path)
     return dest_path
 
+def unique_file_path(file_path):
+    """
+    返回不会覆盖现有文件的路径：若目标已存在，自动追加递增后缀。
+    """
+    if not os.path.exists(file_path):
+        return file_path
+
+    base, ext = os.path.splitext(file_path)
+    counter = 1
+    candidate = f"{base}_{counter}{ext}"
+    while os.path.exists(candidate):
+        counter += 1
+        candidate = f"{base}_{counter}{ext}"
+    return candidate
+
 def extract_json_object(response_text):
     """
     从模型输出中提取第一个完整 JSON 对象，兼容 think 标签和代码块。
@@ -456,7 +471,7 @@ def process_file(file_path, collection, progress_prefix=""):
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
 
         # 保存 CSV 任务指派表
-        csv_path = os.path.join(OUTPUT, f"{base_name}_{time_suffix}.csv")
+        csv_path = unique_file_path(os.path.join(OUTPUT, f"{base_name}_{time_suffix}.csv"))
         df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
         # 6. 生成排版美观的 Markdown 合规审计报告
@@ -510,7 +525,7 @@ def process_file(file_path, collection, progress_prefix=""):
 """
 
         # 保存 Markdown 报告
-        md_path = os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md")
+        md_path = unique_file_path(os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md"))
         with open(md_path, 'w', encoding='utf-8') as f_md:
             f_md.write(md_content)
 
