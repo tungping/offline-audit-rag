@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+import audit_rules
+
 # ──────────────────────────────────────────────
 # 环境初始化与日志
 # ──────────────────────────────────────────────
@@ -413,6 +415,10 @@ def markdown_quote_block(text):
     return "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
 
 
+def mask_markdown_text(value):
+    return audit_rules.mask_sensitive_evidence(str(value))
+
+
 def process_file(file_path, collection, progress_prefix=""):
     """
     对单个文件执行完整的 RAG 审计流程。
@@ -463,6 +469,7 @@ def process_file(file_path, collection, progress_prefix=""):
             data["tasks"] = []
         data.setdefault("compliance_risk", "未知")
         data.setdefault("audit_summary", "模型未返回审计总结")
+        source_file = os.path.basename(file_path)
 
         # 5. 数据清洗与加工 (CSV/Pandas)
         df = pd.DataFrame(data["tasks"])
@@ -480,10 +487,11 @@ def process_file(file_path, collection, progress_prefix=""):
         df["owner"] = df["owner"].fillna("Unassigned").replace({"": "Unassigned"})
         df["task_name"] = df["task_name"].fillna("未知任务").replace({"": "未知任务"})
         df["priority"] = df["priority"].fillna("Medium").replace({"": "Medium"})
-        df["audit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        audit_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        df["audit_time"] = audit_time
 
         # 为 Jira 兼容拓展字段
-        df["source_file"] = os.path.basename(file_path)
+        df["source_file"] = source_file
 
         due_dates = []
         today = datetime.date.today()
@@ -497,24 +505,47 @@ def process_file(file_path, collection, progress_prefix=""):
                 days = 5
             due_dates.append((today + datetime.timedelta(days=days)).isoformat())
         df["due_date"] = due_dates
+        data["tasks"] = df[["task_name", "owner", "priority"]].to_dict("records")
+
+        risk_items = audit_rules.build_risk_items(content, data["tasks"], source_file)
+        risk_columns = [
+            "risk_type",
+            "severity",
+            "evidence_masked",
+            "recommendation",
+            "manual_review_required",
+            "source_file",
+            "audit_time",
+        ]
+        risk_df = pd.DataFrame(risk_items)
+        if risk_df.empty:
+            risk_df = pd.DataFrame(columns=risk_columns)
+        else:
+            risk_df["audit_time"] = audit_time
+            risk_df = risk_df.reindex(columns=risk_columns)
 
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
 
         # 保存 CSV 任务指派表
         csv_path = unique_file_path(
-            os.path.join(OUTPUT, f"{base_name}_{time_suffix}.csv")
+            os.path.join(OUTPUT, f"{base_name}_{time_suffix}_tasks.csv")
         )
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        risk_csv_path = unique_file_path(
+            os.path.join(OUTPUT, f"{base_name}_{time_suffix}_risk_items.csv")
+        )
+        risk_df.to_csv(risk_csv_path, index=False, encoding="utf-8-sig")
 
         # 6. 生成排版美观的 Markdown 合规审计报告
         md_content = f"""# 自动化合规审计与任务指派报告
 
 ## 一、基础审计信息
-- **被处理文件**: `{os.path.basename(file_path)}`
-- **审计结束时间**: `{time.strftime("%Y-%m-%d %H:%M:%S")}`
-- **合规风险评估**: **{data["compliance_risk"]}**
-- **事件审计总结**: *{data["audit_summary"]}*
+- **被处理文件**: `{mask_markdown_text(source_file)}`
+- **审计结束时间**: `{audit_time}`
+- **合规风险评估**: **{mask_markdown_text(data["compliance_risk"])}**
+- **事件审计总结**: *{mask_markdown_text(data["audit_summary"])}*
 
 ## 二、RAG 语义匹配合规基准条款
 """
@@ -522,7 +553,7 @@ def process_file(file_path, collection, progress_prefix=""):
             md_content += f"在本次审计中，语义数据库成功为您提取了最相近的 {len(retrieved_docs)} 条合规基线规范：\n"
             for i, doc in enumerate(retrieved_docs):
                 md_content += (
-                    f"\n> **参考规范 {i + 1}**:\n{markdown_quote_block(doc)}\n"
+                    f"\n> **参考规范 {i + 1}**:\n{markdown_quote_block(mask_markdown_text(doc))}\n"
                 )
         else:
             md_content += (
@@ -541,17 +572,37 @@ def process_file(file_path, collection, progress_prefix=""):
 """
         for idx, (_, row) in enumerate(df.iterrows(), 1):
             md_content += (
-                f"| {idx} | {markdown_table_cell(row.get('task_name'))} | "
-                f"{markdown_table_cell(row.get('owner'))} | "
-                f"{markdown_table_cell(row.get('priority'))} | "
+                f"| {idx} | {markdown_table_cell(mask_markdown_text(row.get('task_name')))} | "
+                f"{markdown_table_cell(mask_markdown_text(row.get('owner')))} | "
+                f"{markdown_table_cell(mask_markdown_text(row.get('priority')))} | "
                 f"{markdown_table_cell(row.get('due_date'))} | "
                 f"{markdown_table_cell(row.get('audit_time'))} |\n"
             )
 
+        md_content += """
+## 四、数据合规与流程治理风险
+"""
+        if risk_df.empty:
+            md_content += "\n> 未检测到确定性数据治理风险项。\n"
+        else:
+            md_content += """
+| 序号 | 风险类型 | 等级 | 证据 | 整改建议 | 人工复核 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+"""
+            for idx, (_, row) in enumerate(risk_df.iterrows(), 1):
+                manual_review = "是" if bool(row.get("manual_review_required")) else "否"
+                md_content += (
+                    f"| {idx} | {markdown_table_cell(mask_markdown_text(row.get('risk_type')))} | "
+                    f"{markdown_table_cell(mask_markdown_text(row.get('severity')))} | "
+                    f"{markdown_table_cell(mask_markdown_text(row.get('evidence_masked')))} | "
+                    f"{markdown_table_cell(mask_markdown_text(row.get('recommendation')))} | "
+                    f"{manual_review} |\n"
+                )
+
         # 附加原始文本摘要
-        excerpt = content[:500] + ("..." if len(content) > 500 else "")
+        excerpt = mask_markdown_text(content[:500] + ("..." if len(content) > 500 else ""))
         md_content += f"""
-## 四、会议原始文本摘要
+## 五、会议原始文本摘要
 以下为本次审计的原始输入片段（截取前 500 字）：
 
 ```text
@@ -561,7 +612,7 @@ def process_file(file_path, collection, progress_prefix=""):
 
         # 保存 Markdown 报告
         md_path = unique_file_path(
-            os.path.join(OUTPUT, f"{base_name}_{time_suffix}.md")
+            os.path.join(OUTPUT, f"{base_name}_{time_suffix}_audit_report.md")
         )
         with open(md_path, "w", encoding="utf-8") as f_md:
             f_md.write(md_content)

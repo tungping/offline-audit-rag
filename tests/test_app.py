@@ -162,7 +162,11 @@ class AppTests(unittest.TestCase):
             with mock.patch('app.OUTPUT', test_output):
                 test_file = os.path.join(test_inbox, "test_meeting.txt")
                 with open(test_file, 'w', encoding='utf-8') as f:
-                    f.write("张三昨天直接把代码 push 到了 master，没有经过 Review。")
+                    f.write(
+                        "张三昨天直接把代码 push 到了 master，没有经过 Review。"
+                        "客户手机号 13812345678 和邮箱 zhangsan@example.com 需要发给销售团队。"
+                        "研发后续跟进，相关人员尽快处理。"
+                    )
                 
                 # 3. 执行审计处理
                 success = app.process_file(test_file, mock_collection)
@@ -171,19 +175,28 @@ class AppTests(unittest.TestCase):
                 self.assertTrue(success)
                 
                 out_files = os.listdir(test_output)
-                self.assertEqual(len(out_files), 2)  # 包含一个 .csv 与一个 .md
+                self.assertEqual(len(out_files), 3)
                 
-                csv_file = [f for f in out_files if f.endswith('.csv')][0]
-                md_file = [f for f in out_files if f.endswith('.md')][0]
+                tasks_csv_file = [f for f in out_files if f.endswith('_tasks.csv')][0]
+                risk_csv_file = [f for f in out_files if f.endswith('_risk_items.csv')][0]
+                md_file = [f for f in out_files if f.endswith('_audit_report.md')][0]
                 
                 # 验证 CSV 字段与内容 (包含新增强的源文件和截止日期字段)
-                df = pd.read_csv(os.path.join(test_output, csv_file))
+                df = pd.read_csv(os.path.join(test_output, tasks_csv_file))
                 self.assertEqual(len(df), 1)
                 self.assertEqual(df.loc[0, 'task_name'], '测试任务')
                 self.assertEqual(df.loc[0, 'owner'], '张三')
                 self.assertEqual(df.loc[0, 'priority'], 'High')
                 self.assertEqual(df.loc[0, 'source_file'], 'test_meeting.txt')
                 self.assertTrue('due_date' in df.columns)
+
+                risk_df = pd.read_csv(os.path.join(test_output, risk_csv_file))
+                self.assertTrue({"risk_type", "severity", "evidence_masked", "recommendation", "manual_review_required"}.issubset(risk_df.columns))
+                risk_evidence = " ".join(str(value) for value in risk_df["evidence_masked"])
+                self.assertIn("138****5678", risk_evidence)
+                self.assertIn("z******n@example.com", risk_evidence)
+                self.assertNotIn("13812345678", risk_evidence)
+                self.assertNotIn("zhangsan@example.com", risk_evidence)
                 
                 # 验证 MD 包含的报告内容和原始片段
                 with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
@@ -192,7 +205,12 @@ class AppTests(unittest.TestCase):
                     self.assertIn("测试汇总", md_text)
                     self.assertIn("测试任务", md_text)
                     self.assertIn("张三", md_text)
-                    self.assertIn("四、会议原始文本摘要", md_text)
+                    self.assertIn("四、数据合规与流程治理风险", md_text)
+                    self.assertIn("五、会议原始文本摘要", md_text)
+                    self.assertIn("138****5678", md_text)
+                    self.assertIn("z******n@example.com", md_text)
+                    self.assertNotIn("13812345678", md_text)
+                    self.assertNotIn("zhangsan@example.com", md_text)
                     self.assertIn("张三昨天直接把代码 push 到了 master", md_text)
 
     @mock.patch('app.ollama.embeddings')
@@ -227,7 +245,7 @@ class AppTests(unittest.TestCase):
                 self.assertTrue(success)
 
                 out_files = os.listdir(test_output)
-                md_file = [f for f in out_files if f.endswith('.md')][0]
+                md_file = [f for f in out_files if f.endswith('_audit_report.md')][0]
 
                 with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
                     md_text = f_md.read()
