@@ -6,6 +6,7 @@ from pathlib import Path
 import unittest.mock as mock
 import pandas as pd
 
+import audit_rules
 import app
 import transcribe
 
@@ -72,6 +73,60 @@ class AppTests(unittest.TestCase):
     def test_transcribe_resolve_executable_supports_path_command_names(self):
         self.assertEqual(transcribe.resolve_executable("python"), shutil.which("python") or "python")
         self.assertEqual(transcribe.resolve_executable("~/bin/custom-tool"), os.path.expanduser("~/bin/custom-tool"))
+
+    def test_build_risk_items_masks_sensitive_evidence(self):
+        text = (
+            "客户手机号 13812345678，邮箱 zhangsan@example.com，"
+            "身份证 11010519491231002X，需要发给销售。"
+        )
+
+        risks = audit_rules.build_risk_items(text, [], "demo.txt")
+
+        evidence = " ".join(str(item["evidence_masked"]) for item in risks)
+        self.assertIn("138****5678", evidence)
+        self.assertIn("z******n@example.com", evidence)
+        self.assertIn("110105********002X", evidence)
+        self.assertNotIn("13812345678", evidence)
+        self.assertNotIn("zhangsan@example.com", evidence)
+        self.assertNotIn("11010519491231002X", evidence)
+
+        high_risks = [item for item in risks if item["severity"] == "High"]
+        self.assertTrue(high_risks)
+        self.assertTrue(all(item["manual_review_required"] for item in high_risks))
+
+    def test_build_risk_items_detects_ambiguous_phrases(self):
+        text = "研发后续跟进数据导出脚本，相关人员尽快处理。"
+
+        risks = audit_rules.build_risk_items(text, [], "demo.txt")
+
+        vague_risks = [item for item in risks if item["risk_type"] == "模糊表述"]
+        evidence = {item["evidence_masked"] for item in vague_risks}
+        self.assertIn("后续跟进", evidence)
+        self.assertIn("相关人员", evidence)
+        self.assertIn("尽快", evidence)
+        self.assertTrue(all(item["severity"] == "Medium" for item in vague_risks))
+
+    def test_build_risk_items_detects_sop_gaps_for_unassigned_task(self):
+        text = "数据导出脚本需要处理，完成后同步业务方。"
+        tasks = [{"task_name": "处理数据导出脚本", "owner": "Unassigned", "priority": "High"}]
+
+        risks = audit_rules.build_risk_items(text, tasks, "demo.txt")
+
+        sop_risks = [item for item in risks if item["risk_type"] == "SOP缺失"]
+        evidence = {item["evidence_masked"] for item in sop_risks}
+        self.assertIn("任务缺少明确负责人: 处理数据导出脚本", evidence)
+        self.assertIn("缺少明确截止时间", evidence)
+        self.assertIn("缺少验收标准或交付物定义", evidence)
+
+    def test_build_risk_items_detects_cross_department_risk_without_confirmer(self):
+        text = "产品、法务、研发和销售一起看一下客户数据导出方案，没问题就上线。"
+
+        risks = audit_rules.build_risk_items(text, [], "demo.txt")
+
+        collaboration_risks = [item for item in risks if item["risk_type"] == "跨部门协作风险"]
+        self.assertEqual(len(collaboration_risks), 1)
+        self.assertIn("产品、研发、法务、销售", collaboration_risks[0]["evidence_masked"])
+        self.assertEqual(collaboration_risks[0]["severity"], "Medium")
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
