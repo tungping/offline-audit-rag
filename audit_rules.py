@@ -5,7 +5,11 @@ from typing import Any
 RiskItem = dict[str, Any]
 
 MOBILE_PATTERN = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
-EMAIL_PATTERN = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
+EMAIL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._%+\-*])"
+    r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
+    r"(?![A-Za-z0-9._%+\-*])"
+)
 ID_CARD_PATTERN = re.compile(r"(?<!\d)(\d{6}\d{8}\d{3}[\dXx])(?!\d)")
 DATE_TIME_PATTERN = re.compile(
     r"(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?|"
@@ -40,6 +44,21 @@ def mask_sensitive_value(value: str, risk_type: str) -> str:
     return value
 
 
+def mask_sensitive_evidence(evidence: str) -> str:
+    masking_patterns = [
+        ("邮箱", EMAIL_PATTERN),
+        ("身份证", ID_CARD_PATTERN),
+        ("手机号", MOBILE_PATTERN),
+    ]
+    masked = evidence
+    for label, pattern in masking_patterns:
+        masked = pattern.sub(
+            lambda match, label=label: mask_sensitive_value(match.group(1), label),
+            masked,
+        )
+    return masked
+
+
 def _risk_item(
     risk_type: str,
     severity: str,
@@ -51,7 +70,7 @@ def _risk_item(
     return {
         "risk_type": risk_type,
         "severity": severity,
-        "evidence_masked": evidence_masked,
+        "evidence_masked": mask_sensitive_evidence(evidence_masked),
         "recommendation": recommendation,
         "manual_review_required": manual_review_required,
         "source_file": source_file,
