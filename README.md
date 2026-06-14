@@ -5,6 +5,36 @@
 
 ---
 
+## 🎯 Portfolio Demo
+
+这个项目面向 **AI 应用开发** 与 **数据分析自动化** 场景：把非结构化会议记录或录音转成可审计、可汇总、可交付的结构化治理数据。
+
+不用安装本地模型也可以先看脱敏样例：
+
+| 内容 | 文件 |
+|------|------|
+| 样例会议输入 | [`examples/sample_meeting.txt`](examples/sample_meeting.txt) |
+| 任务指派 CSV | [`examples/sample_tasks.csv`](examples/sample_tasks.csv) |
+| 风险项 CSV | [`examples/sample_risk_items.csv`](examples/sample_risk_items.csv) |
+| Markdown 审计报告 | [`examples/sample_audit_report.md`](examples/sample_audit_report.md) |
+| 批量汇总报告 | [`examples/sample_portfolio_summary.md`](examples/sample_portfolio_summary.md) |
+
+适合在简历或面试中强调的能力点：
+
+- **本地 AI 工作流**：Ollama + ChromaDB + whisper.cpp，适合隐私敏感的企业内网场景。
+- **RAG 审计**：从本地合规条款中检索相关基准，再交给本地大模型完成审计与任务提取。
+- **数据治理自动化**：自动识别手机号、邮箱、身份证、客户名称、员工信息、SOP 缺口和跨部门协作风险。
+- **结构化分析输出**：生成任务 CSV、风险 CSV、Markdown 报告，并可进一步汇总成指标报告。
+- **可测试工程实现**：核心清洗、脱敏、取消、汇总和输出逻辑有自动化测试覆盖。
+
+批量汇总已有审计输出：
+
+```bash
+uv run python summarize_audits.py --output-dir output --write output/portfolio_summary.md
+```
+
+---
+
 ## ✨ 核心特性
 
 - 🔒 **完全离线**：所有语音转文字、大模型推理与向量化均在本地运行，数据不上传任何云端，安全可靠。
@@ -62,6 +92,7 @@ archive/ (成功归档) 或 failed/ (失败隔离)
 | **格式转换工具** | `ffmpeg` + `ffprobe` | 自动探测并将各类音频/视频转为 16kHz 单声道 WAV |
 | **数据处理** | pandas | 任务清洗、去重、CSV 导出 |
 | **WebUI** | Streamlit | 浏览器内粘贴/上传文本、查看风险表和下载审计包 |
+| **批量汇总** | `summarize_audits.py` | 汇总多次审计输出，生成风险分布和人工复核指标 |
 
 ---
 
@@ -72,7 +103,9 @@ offline_auto_audit/
 ├── app.py                        # 🚀 合规审计主程序
 ├── webui.py                      # 🖥️ 浏览器审计界面
 ├── transcribe.py                 # 🎙️ 音频转文字守护程序
+├── summarize_audits.py           # 📊 批量审计结果汇总脚本
 ├── pyproject.toml                # Python 依赖与测试配置
+├── examples/                     # 🧪 脱敏演示输入与输出样例
 │
 ├── recordings/                   # 📥 放入待转录音频文件
 ├── inbox/                        # 📥 投入待审文件（.txt，transcribe.py 也会自动输出到此）
@@ -273,6 +306,16 @@ WHISPER_LANGUAGE=zh WHISPER_MODEL=~/whisper.cpp/models/ggml-large-v3.bin uv run 
 | `*_audit_report.md` | Markdown 审计报告，整合合规结论、RAG 参考基准、任务表和风险项 |
 
 敏感字段会在报告、CSV 和输出文件名中尽量脱敏，例如手机号、邮箱和身份证号不会以完整明文展示。
+
+### 批量汇总报告
+
+如需把多次审计输出整理成数据治理指标，可运行：
+
+```bash
+uv run python summarize_audits.py --output-dir output --write output/portfolio_summary.md
+```
+
+汇总报告包括审计文件数、任务数、风险数、高/中风险分布、风险类型分布和人工复核数量。
 
 ---
 

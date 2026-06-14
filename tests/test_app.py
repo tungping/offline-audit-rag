@@ -9,6 +9,7 @@ import pandas as pd
 
 import audit_rules
 import app
+import summarize_audits
 import transcribe
 import webui
 
@@ -538,6 +539,65 @@ class AppTests(unittest.TestCase):
                 return "中文会议记录".encode("gb18030")
 
         self.assertEqual(webui.read_uploaded_text(UploadedFile()), "中文会议记录")
+
+    def test_summarize_audit_outputs_aggregates_tasks_and_risks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            pd.DataFrame(
+                [
+                    {"task_name": "修复导出脚本", "owner": "李四", "priority": "High"},
+                    {"task_name": "补充验收标准", "owner": "王五", "priority": "Medium"},
+                ]
+            ).to_csv(output_dir / "demo_2026-06-14_10_00_tasks.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "risk_type": "敏感信息",
+                        "severity": "High",
+                        "manual_review_required": True,
+                        "source_file": "demo.txt",
+                    },
+                    {
+                        "risk_type": "SOP缺失",
+                        "severity": "Medium",
+                        "manual_review_required": False,
+                        "source_file": "demo.txt",
+                    },
+                    {
+                        "risk_type": "敏感信息",
+                        "severity": "High",
+                        "manual_review_required": "True",
+                        "source_file": "demo.txt",
+                    },
+                ]
+            ).to_csv(output_dir / "demo_2026-06-14_10_00_risk_items.csv", index=False)
+
+            summary = summarize_audits.summarize_output_dir(output_dir)
+
+        self.assertEqual(summary["audited_file_count"], 1)
+        self.assertEqual(summary["task_count"], 2)
+        self.assertEqual(summary["risk_count"], 3)
+        self.assertEqual(summary["severity_counts"]["High"], 2)
+        self.assertEqual(summary["severity_counts"]["Medium"], 1)
+        self.assertEqual(summary["risk_type_counts"]["敏感信息"], 2)
+        self.assertEqual(summary["manual_review_count"], 2)
+
+    def test_render_summary_markdown_includes_portfolio_metrics(self):
+        summary = {
+            "audited_file_count": 2,
+            "task_count": 3,
+            "risk_count": 4,
+            "manual_review_count": 1,
+            "severity_counts": {"High": 2, "Medium": 2},
+            "risk_type_counts": {"敏感信息": 2, "SOP缺失": 2},
+        }
+
+        markdown = summarize_audits.render_summary_markdown(summary)
+
+        self.assertIn("# Audit Portfolio Summary", markdown)
+        self.assertIn("| Audited files | 2 |", markdown)
+        self.assertIn("| Tasks extracted | 3 |", markdown)
+        self.assertIn("| 敏感信息 | 2 |", markdown)
 
     def test_webui_sync_knowledge_base_cache_clears_cached_collection(self):
         clear_mock = mock.Mock()

@@ -1,0 +1,7 @@
+risk_type,severity,evidence_masked,recommendation,manual_review_required,source_file,audit_time
+敏感信息,High,138****5678,删除或脱敏后再流转，并确认共享范围是否合规。,True,sample_meeting.txt,2026-06-14 19:30:00
+敏感信息,High,z******n@example.com,删除或脱敏后再流转，并确认共享范围是否合规。,True,sample_meeting.txt,2026-06-14 19:30:00
+SOP缺失,Medium,任务缺少明确负责人: 确认客户数据共享方案合规性,补充明确负责人、截止时间和验收标准。,False,sample_meeting.txt,2026-06-14 19:30:00
+SOP缺失,Medium,任务缺少明确截止时间: 修复数据导出接口超时问题,补充明确负责人、截止时间和验收标准。,False,sample_meeting.txt,2026-06-14 19:30:00
+SOP缺失,Medium,缺少验收标准或交付物定义,补充明确负责人、截止时间和验收标准。,False,sample_meeting.txt,2026-06-14 19:30:00
+跨部门协作风险,Medium,涉及多个部门但缺少确认人: 产品、法务、销售,指定跨部门确认人或审批人，并记录确认结论。,False,sample_meeting.txt,2026-06-14 19:30:00
