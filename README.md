@@ -60,6 +60,7 @@ archive/ (成功归档) 或 failed/ (失败隔离)
 | **向量数据库** | ChromaDB（本地嵌入式） | 合规知识库持久化存储 |
 | **格式转换工具** | `ffmpeg` + `ffprobe` | 自动探测并将各类音频/视频转为 16kHz 单声道 WAV |
 | **数据处理** | pandas | 任务清洗、去重、CSV 导出 |
+| **WebUI** | Streamlit | 浏览器内粘贴/上传文本、查看风险表和下载审计包 |
 
 ---
 
@@ -68,8 +69,9 @@ archive/ (成功归档) 或 failed/ (失败隔离)
 ```
 offline_auto_audit/
 ├── app.py                        # 🚀 合规审计主程序
+├── webui.py                      # 🖥️ 浏览器审计界面
 ├── transcribe.py                 # 🎙️ 音频转文字守护程序
-├── requirements.txt              # Python 依赖
+├── pyproject.toml                # Python 依赖与测试配置
 │
 ├── recordings/                   # 📥 放入待转录音频文件
 ├── inbox/                        # 📥 投入待审文件（.txt，transcribe.py 也会自动输出到此）
@@ -127,8 +129,25 @@ bash models/download-ggml-model.sh medium
 ```bash
 # 创建虚拟环境并同步依赖
 uv venv
-uv pip install -r requirements.txt
+uv sync
 ```
+
+---
+
+## 🖥️ WebUI 快速体验
+
+如果只想演示会议文本、SOP 或任务指派文本的审计结果，可以直接启动浏览器界面：
+
+```bash
+uv run streamlit run webui.py
+```
+
+WebUI 支持：
+
+- 粘贴会议记录 / SOP / 任务指派文本
+- 上传 `.txt` 文件
+- 在线查看风险项表格、任务表格和 Markdown 审计报告
+- 下载任务 CSV、风险项 CSV 和 Markdown 审计报告
 
 ---
 

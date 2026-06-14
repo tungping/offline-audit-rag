@@ -11,6 +11,7 @@ import termios
 import threading
 import time
 import tty
+from dataclasses import dataclass
 from typing import Any, cast
 
 import chromadb
@@ -89,6 +90,14 @@ You MUST reply strictly in the following JSON format. Do not include any markdow
     }}
   ]
 }}"""
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    success: bool
+    tasks_csv_path: str = ""
+    risk_csv_path: str = ""
+    report_path: str = ""
 
 
 def count_tokens(text):
@@ -434,7 +443,7 @@ def mask_dataframe_text_columns(df):
     return masked_df
 
 
-def process_file(file_path, collection, progress_prefix=""):
+def process_file_with_result(file_path, collection, progress_prefix=""):
     """
     对单个文件执行完整的 RAG 审计流程。
     """
@@ -637,7 +646,12 @@ def process_file(file_path, collection, progress_prefix=""):
         logging.info(
             f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。"
         )
-        return True
+        return ProcessResult(
+            success=True,
+            tasks_csv_path=csv_path,
+            risk_csv_path=risk_csv_path,
+            report_path=md_path,
+        )
 
     except Exception as e:
         logging.exception(f"文件处理失败: {e}")
@@ -646,7 +660,12 @@ def process_file(file_path, collection, progress_prefix=""):
             logging.error(
                 f"--- 原始模型输出预览 --- \n{masked_preview}\n------------------------"
             )
-        return False
+        return ProcessResult(success=False)
+
+
+def process_file(file_path, collection, progress_prefix=""):
+    result = process_file_with_result(file_path, collection, progress_prefix)
+    return result.success
 
 
 # 检查并自动构建文件夹环境
