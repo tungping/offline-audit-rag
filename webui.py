@@ -69,6 +69,28 @@ def read_text(path: str) -> str:
         return file.read()
 
 
+def is_safe_rule_filename(filename: str) -> bool:
+    stripped_name = filename.strip()
+    if not stripped_name.endswith(".txt"):
+        return False
+    if not stripped_name or "/" in stripped_name or "\\" in stripped_name:
+        return False
+    if Path(stripped_name).name != stripped_name:
+        return False
+    return ".." not in Path(stripped_name).parts
+
+
+def sync_knowledge_base_cache(
+    rebuild_func=app.rebuild_knowledge_base,
+    clear_cache=None,
+):
+    if clear_cache is None:
+        clear_cache = load_collection.clear
+    collection = rebuild_func()
+    clear_cache()
+    return collection
+
+
 def run_audit_worker(
     input_path: str,
     collection,
@@ -349,7 +371,7 @@ def main() -> None:
                         f.write(edited_content)
                     st.success(f"保存成功：{selected_file}")
                     with st.spinner("正在重新构建语义向量库..."):
-                        app.rebuild_knowledge_base()
+                        sync_knowledge_base_cache()
                     st.success("语义向量库已同步重构！")
                     st.rerun()
                 except Exception as e:
@@ -360,7 +382,7 @@ def main() -> None:
                     os.remove(file_path)
                     st.success(f"已删除：{selected_file}")
                     with st.spinner("正在重新构建语义向量库..."):
-                        app.rebuild_knowledge_base()
+                        sync_knowledge_base_cache()
                     st.success("语义向量库已同步重构！")
                     st.rerun()
                 except Exception as e:
@@ -374,10 +396,8 @@ def main() -> None:
         new_file_content = st.text_area("内容", height=150, placeholder="在此输入合规检查基准条款...")
         
         if st.button("创建并加载规则", type="primary", key="create_rule_btn"):
-            if not new_file_name.endswith(".txt"):
-                st.error("文件名必须以 .txt 结尾")
-            elif not new_file_name.strip():
-                st.error("文件名不能为空")
+            if not is_safe_rule_filename(new_file_name):
+                st.error("文件名必须是当前目录下的 .txt 文件名，不能包含路径或 ..")
             elif not new_file_content.strip():
                 st.error("内容不能为空")
             else:
@@ -387,7 +407,7 @@ def main() -> None:
                         f.write(new_file_content)
                     st.success(f"创建成功：{new_file_name}")
                     with st.spinner("正在重新构建语义向量库..."):
-                        app.rebuild_knowledge_base()
+                        sync_knowledge_base_cache()
                     st.success("语义向量库已构建！")
                     st.rerun()
                 except Exception as e:

@@ -9,6 +9,7 @@ import pandas as pd
 import audit_rules
 import app
 import transcribe
+import webui
 
 
 class AppTests(unittest.TestCase):
@@ -457,6 +458,35 @@ class AppTests(unittest.TestCase):
         
         self.assertTrue(docs)
         self.assertTrue(mock_embeddings.call_count > 1)
+
+    def test_webui_rule_filename_rejects_path_traversal(self):
+        unsafe_names = [
+            "../escape.txt",
+            "nested/rules.txt",
+            "/tmp/rules.txt",
+            "..\\escape.txt",
+            "",
+            "rules.md",
+        ]
+
+        for name in unsafe_names:
+            with self.subTest(name=name):
+                self.assertFalse(webui.is_safe_rule_filename(name))
+
+        self.assertTrue(webui.is_safe_rule_filename("custom_rules.txt"))
+
+    def test_webui_sync_knowledge_base_cache_clears_cached_collection(self):
+        clear_mock = mock.Mock()
+        rebuild_mock = mock.Mock(return_value="collection")
+
+        result = webui.sync_knowledge_base_cache(
+            rebuild_func=rebuild_mock,
+            clear_cache=clear_mock,
+        )
+
+        self.assertEqual(result, "collection")
+        rebuild_mock.assert_called_once_with()
+        clear_mock.assert_called_once_with()
 
 
 if __name__ == "__main__":
