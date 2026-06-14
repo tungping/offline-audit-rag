@@ -40,3 +40,10 @@ This file records all code modifications, features, and fixes implemented in thi
   - Added `is_safe_rule_filename()` to reject path traversal, absolute paths, nested paths, empty names, and non-`.txt` filenames when creating compliance rule files from the WebUI.
   - Added `sync_knowledge_base_cache()` so WebUI rule save/delete/create actions rebuild ChromaDB and clear the cached Streamlit collection before the next audit.
   - Added regression tests covering unsafe rule filenames and cache clearing after knowledge base rebuilds.
+
+### 8. WebUI Audit Polling Review Fix
+- **Author**: GPT-5.5
+- **Files**: [webui.py](file:///Users/tenan/Coding/projects/offline_auto_audit/webui.py) and [tests/test_app.py](file:///Users/tenan/Coding/projects/offline_auto_audit/tests/test_app.py)
+- **Change**:
+  - Replaced the running-audit busy wait loop with a single short polling tick followed by `st.rerun()`, keeping the Streamlit script responsive to the "停止审计" button.
+  - Added `running_audit_poll_tick()` and a regression test to ensure the running state performs one bounded poll instead of blocking until audit completion.

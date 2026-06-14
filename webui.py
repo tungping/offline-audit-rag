@@ -139,6 +139,15 @@ def poll_audit_result() -> None:
     cleanup_input_file()
 
 
+def running_audit_poll_tick(
+    poll_result=poll_audit_result,
+    sleep_func=time.sleep,
+    interval=0.5,
+) -> None:
+    sleep_func(interval)
+    poll_result()
+
+
 def render_outputs(result: app.ProcessResult) -> None:
     tasks_df = pd.read_csv(result.tasks_csv_path)
     risks_df = pd.read_csv(result.risk_csv_path)
@@ -462,19 +471,14 @@ def main() -> None:
     if st.session_state.audit_running:
         with st.spinner("正在执行本地审计..."):
             st.info("正在审计中，可以点击“停止审计”中断本次任务。")
-            while st.session_state.audit_running:
-                time.sleep(0.1)
+            running_audit_poll_tick()
+            thread = st.session_state.get("audit_thread")
+            if thread is not None and not thread.is_alive():
                 poll_audit_result()
-                # Safeguard: check if thread is still running
-                thread = st.session_state.get("audit_thread")
-                if thread is not None and not thread.is_alive():
-                    # Poll one last time in case it just finished
-                    poll_audit_result()
-                    if st.session_state.audit_running:
-                        st.session_state.audit_running = False
-                        st.session_state.audit_error = "审计线程意外终止。"
-                        cleanup_input_file()
-                    break
+                if st.session_state.audit_running:
+                    st.session_state.audit_running = False
+                    st.session_state.audit_error = "审计线程意外终止。"
+                    cleanup_input_file()
             st.rerun()
 
     result = st.session_state.audit_result

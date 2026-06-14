@@ -488,6 +488,19 @@ class AppTests(unittest.TestCase):
         rebuild_mock.assert_called_once_with()
         clear_mock.assert_called_once_with()
 
+    def test_webui_running_audit_poll_tick_does_not_block_until_completion(self):
+        poll_mock = mock.Mock()
+        sleep_mock = mock.Mock()
+
+        webui.running_audit_poll_tick(
+            poll_result=poll_mock,
+            sleep_func=sleep_mock,
+            interval=0.2,
+        )
+
+        sleep_mock.assert_called_once_with(0.2)
+        poll_mock.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
