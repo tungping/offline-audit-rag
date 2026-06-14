@@ -394,7 +394,6 @@ class AppTests(unittest.TestCase):
                     f.write("本次会议流程正常，无异常事项。")
 
                 success = app.process_file(test_file, mock_collection)
-
                 self.assertTrue(success)
 
                 out_files = os.listdir(test_output)
@@ -406,6 +405,58 @@ class AppTests(unittest.TestCase):
                     self.assertIn("⚠️", md_text)
                     self.assertIn("RELEVANCE_THRESHOLD", md_text)
                     self.assertNotIn("参考规范 1", md_text)
+
+    def test_extract_json_object_fixes_trailing_commas(self):
+        # trailing comma in list and in dict
+        malformed = '{"tasks": [{"a": 1,},], "summary": "ok",}'
+        fixed = app.extract_json_object(malformed)
+        import json
+        data = json.loads(fixed)
+        self.assertEqual(data["tasks"][0]["a"], 1)
+        self.assertEqual(data["summary"], "ok")
+
+    @mock.patch('app.ollama.Client')
+    def test_check_ollama_status_offline(self, mock_client_cls):
+        mock_client = mock.Mock()
+        mock_client.list.side_effect = Exception("connection refused")
+        mock_client_cls.return_value = mock_client
+        
+        status = app.check_ollama_status()
+        self.assertFalse(status["connected"])
+        self.assertIn("connection refused", status["error"])
+
+    @mock.patch('app.ollama.Client')
+    def test_check_ollama_status_connected(self, mock_client_cls):
+        mock_client = mock.Mock()
+        mock_client.list.return_value = {
+            "models": [
+                {"model": "qwen3.5:9b"},
+                {"model": "nomic-embed-text:latest"}
+            ]
+        }
+        mock_client_cls.return_value = mock_client
+        
+        status = app.check_ollama_status()
+        self.assertTrue(status["connected"])
+        self.assertTrue(status["audit_model_ok"])
+        self.assertTrue(status["embed_model_ok"])
+
+    @mock.patch('app.ollama.embeddings')
+    def test_retrieve_relevant_context_chunks_for_long_text(self, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 规则']],
+            'distances': [[0.2]]
+        }
+        
+        # A long text (over 500 tokens / words) to trigger chunking
+        long_text = "test " * 600
+        docs = app.retrieve_relevant_context(mock_collection, long_text, top_k=2)
+        
+        self.assertTrue(docs)
+        self.assertTrue(mock_embeddings.call_count > 1)
 
 
 if __name__ == "__main__":

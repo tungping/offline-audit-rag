@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import select
 import shutil
 import sys
@@ -293,27 +294,51 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
     """
     语义检索网关：将查询日志转为向量并在本地 collection 中检索出最相关的 top_k 条合规基准，
     利用 RELEVANCE_THRESHOLD 进行相关度度量过滤。
+    对于长输入，采用分段检索以避免整体向量化导致精度下降。
     """
-    res = ollama.embeddings(model=EMBED_MODEL, prompt=query_text)
-    query_embedding = res["embedding"]
+    # 估算 Token。若输入较短直接检索，若较长进行分片检索
+    if count_tokens(query_text) <= 500:
+        texts_to_embed = [query_text]
+    else:
+        # 分片检索并去重聚合
+        texts_to_embed = recursive_split_text(query_text, chunk_size=400, chunk_overlap=100)
+        if len(texts_to_embed) > 10:
+            texts_to_embed = texts_to_embed[:10]
 
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=top_k,
-        include=["documents", "distances"],
-    )
+    all_retrieved = []
+    seen_docs = set()
 
-    retrieved_docs = []
-    if results and "documents" in results and results["documents"]:
-        docs = results["documents"][0]
-        distances = results.get("distances", [[]])[0]
-        for doc, dist in zip(docs, distances):
-            if dist < RELEVANCE_THRESHOLD:
-                retrieved_docs.append(doc)
-            else:
-                logging.info(
-                    f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}..."
-                )
+    for text in texts_to_embed:
+        if not text.strip():
+            continue
+        try:
+            res = ollama.embeddings(model=EMBED_MODEL, prompt=text)
+            query_embedding = res["embedding"]
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k,
+                include=["documents", "distances"],
+            )
+
+            if results and "documents" in results and results["documents"]:
+                docs = results["documents"][0]
+                distances = results.get("distances", [[]])[0]
+                for doc, dist in zip(docs, distances):
+                    if dist < RELEVANCE_THRESHOLD:
+                        if doc not in seen_docs:
+                            seen_docs.add(doc)
+                            all_retrieved.append((doc, dist))
+                    else:
+                        logging.debug(
+                            f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}..."
+                        )
+        except Exception as e:
+            logging.error(f"提取分片 Embedding 检索失败: {e}")
+
+    # 按相似度（距离越小越好）排序，截取前 top_k 个
+    all_retrieved.sort(key=lambda x: x[1])
+    retrieved_docs = [doc for doc, dist in all_retrieved[:top_k]]
+
     if not retrieved_docs:
         logging.warning(
             f"RAG 未检索到任何相关合规条款（threshold={RELEVANCE_THRESHOLD}），"
@@ -367,6 +392,7 @@ def unique_file_path(file_path):
 def extract_json_object(response_text):
     """
     从模型输出中提取第一个完整 JSON 对象，兼容 think 标签和代码块。
+    并在返回前尝试自动修复常见的 JSON 语法问题（如尾部多余的逗号）。
     """
     text = response_text.strip()
     if "</think>" in text:
@@ -385,6 +411,7 @@ def extract_json_object(response_text):
     depth = 0
     in_string = False
     escape_next = False
+    end_idx = -1
     for idx in range(start, len(text)):
         char = text[idx]
         if escape_next:
@@ -403,9 +430,19 @@ def extract_json_object(response_text):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return text[start : idx + 1].strip()
+                end_idx = idx
+                break
 
-    raise ValueError("模型输出中的 JSON 对象不完整")
+    if end_idx == -1:
+        raise ValueError("模型输出中的 JSON 对象不完整")
+
+    json_str = text[start : end_idx + 1].strip()
+
+    # 自动修复一些常见的 JSON 语法瑕疵，例如多余的尾随逗号
+    json_str = re.sub(r',\s*\]', ']', json_str)
+    json_str = re.sub(r',\s*\}', '}', json_str)
+
+    return json_str
 
 
 def markdown_table_cell(value):
@@ -680,6 +717,67 @@ def check_environment():
         os.makedirs(d, exist_ok=True)
 
 
+def check_ollama_status() -> dict[str, Any]:
+    """
+    检查 Ollama 是否在线，以及所需的 AUDIT_MODEL 和 EMBED_MODEL 是否可用。
+    """
+    try:
+        client = ollama.Client()
+        models_info = client.list()
+        models = [m.get("model") or m.get("name") for m in models_info.get("models", [])]
+        
+        audit_model_ok = AUDIT_MODEL in models or any(m.startswith(AUDIT_MODEL + ":") for m in models)
+        embed_model_ok = EMBED_MODEL in models or any(m.startswith(EMBED_MODEL + ":") for m in models)
+        
+        return {
+            "connected": True,
+            "audit_model_ok": audit_model_ok,
+            "embed_model_ok": embed_model_ok,
+            "models": models,
+            "error": ""
+        }
+    except Exception as e:
+        return {
+            "connected": False,
+            "audit_model_ok": False,
+            "embed_model_ok": False,
+            "models": [],
+            "error": str(e)
+        }
+
+
+def rebuild_knowledge_base():
+    """
+    强制删除现有 collection 并重新构建向量库。
+    """
+    client = chromadb.PersistentClient(path=VECTOR_STORE_DIR)
+    try:
+        client.delete_collection(name="compliance_rules")
+    except Exception:
+        pass
+    return initialize_knowledge_base()
+
+
+def wait_for_file_ready(file_path, timeout=5, stable_interval=0.5):
+    """
+    等待文件写入完成：如果在 stable_interval 内文件大小没有变化，则认为写入完成。
+    """
+    if not os.path.exists(file_path):
+        return False
+    start_time = time.time()
+    last_size = -1
+    while time.time() - start_time < timeout:
+        try:
+            current_size = os.path.getsize(file_path)
+            if current_size == last_size and current_size > 0:
+                return True
+            last_size = current_size
+        except Exception:
+            pass
+        time.sleep(stable_interval)
+    return False
+
+
 def check_exit_or_sleep(timeout=POLL_INTERVAL):
     """
     非阻塞检查用户是否按下了 ESC 键。
@@ -741,6 +839,16 @@ class InboxFileHandler(FileSystemEventHandler):
 
 if __name__ == "__main__":
     check_environment()
+    
+    ollama_status = check_ollama_status()
+    if not ollama_status["connected"]:
+        logging.error(f"❌ 无法连接到 Ollama 服务，请确认 Ollama 正在运行！错误: {ollama_status['error']}")
+    else:
+        if not ollama_status["audit_model_ok"]:
+            logging.warning(f"⚠️ 审计模型 {AUDIT_MODEL} 未在 Ollama 中下载，运行可能会报错，建议运行 'ollama pull {AUDIT_MODEL}'。")
+        if not ollama_status["embed_model_ok"]:
+            logging.warning(f"⚠️ 向量模型 {EMBED_MODEL} 未在 Ollama 中下载，运行可能会报错，建议运行 'ollama pull {EMBED_MODEL}'。")
+
     logging.info("正在连接本地向量库与初始化知识库...")
     collection = initialize_knowledge_base()
 
@@ -779,6 +887,11 @@ if __name__ == "__main__":
                 full_path = file_queue.get()
                 try:
                     if os.path.exists(full_path):
+                        if not wait_for_file_ready(full_path):
+                            logging.warning(
+                                f"文本文件写入不稳定，跳过审计: {os.path.basename(full_path)}"
+                            )
+                            continue
                         try:
                             # 对单个文件执行处理
                             success = process_file(full_path, collection)

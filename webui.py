@@ -1,5 +1,6 @@
 import os
 import queue
+import shutil
 import tempfile
 import threading
 import time
@@ -9,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 import app
+import transcribe
 
 
 DEMO_TEXT = """今天会议决定把客户张女士的手机号 13812345678 和邮箱 zhangsan@example.com 发给销售团队。
@@ -187,7 +189,44 @@ def main() -> None:
         st.write(f"向量模型：`{app.EMBED_MODEL}`")
         st.write(f"语义阈值：`{app.RELEVANCE_THRESHOLD}`")
 
-    input_tab, upload_tab = st.tabs(["粘贴文本", "上传 TXT"])
+        st.markdown("---")
+        st.subheader("Ollama 服务状态")
+        status = app.check_ollama_status()
+        if status["connected"]:
+            st.success("Ollama 服务: 已连接")
+            import ollama
+            if status["audit_model_ok"]:
+                st.success("审计模型: 就绪")
+            else:
+                st.warning("审计模型: 未拉取")
+                if st.button("拉取审计模型", key="pull_audit_btn"):
+                    with st.spinner("正在下载审计模型..."):
+                        try:
+                            ollama.pull(app.AUDIT_MODEL)
+                            st.success("审计模型拉取成功！")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"拉取失败: {e}")
+
+            if status["embed_model_ok"]:
+                st.success("向量模型: 就绪")
+            else:
+                st.warning("向量模型: 未拉取")
+                if st.button("拉取向量模型", key="pull_embed_btn"):
+                    with st.spinner("正在下载向量模型..."):
+                        try:
+                            ollama.pull(app.EMBED_MODEL)
+                            st.success("向量模型拉取成功！")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"拉取失败: {e}")
+        else:
+            st.error("Ollama 服务: 离线")
+            st.info("请检查 Ollama 服务是否启动 (例如运行 `ollama serve`)。")
+
+    input_tab, upload_tab, audio_tab, config_tab = st.tabs(
+        ["粘贴文本", "上传 TXT", "上传音频", "合规条款管理"]
+    )
 
     with input_tab:
         pasted_text = st.text_area(
@@ -201,6 +240,158 @@ def main() -> None:
         uploaded_text = read_uploaded_text(uploaded_file)
         if uploaded_text:
             st.text_area("文件内容预览", value=uploaded_text, height=220)
+
+    with audio_tab:
+        st.subheader("本地语音转文字审计")
+        missing_deps = []
+        if not shutil.which("ffmpeg"):
+            missing_deps.append("ffmpeg")
+        if not shutil.which("ffprobe"):
+            missing_deps.append("ffprobe")
+        whisper_cli = transcribe.WHISPER_CLI
+        if not os.path.isfile(whisper_cli) or not os.access(whisper_cli, os.X_OK):
+            missing_deps.append(f"whisper-cli ({whisper_cli})")
+        if not os.path.isfile(transcribe.DEFAULT_MODEL):
+            missing_deps.append(f"Whisper 模型 ggml-medium.bin (路径: {transcribe.DEFAULT_MODEL})")
+
+        if missing_deps:
+            st.warning("⚠️ 语音识别依赖未完整配置，音频转录功能暂不可用：")
+            for dep in missing_deps:
+                st.write(f"- 缺失 `{dep}`")
+            st.info("提示：请在本地安装 ffmpeg，并检查 `.env` 中的 `WHISPER_CLI` 和 `WHISPER_MODEL` 路径是否正确。")
+        else:
+            uploaded_audio = st.file_uploader(
+                "选择音频文件",
+                type=[ext.lstrip(".") for ext in transcribe.AUDIO_EXTENSIONS],
+            )
+            if uploaded_audio is not None:
+                st.audio(uploaded_audio)
+                if st.button("开始音频转录与合规审计", type="primary", disabled=st.session_state.audit_running):
+                    suffix = Path(uploaded_audio.name).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_audio:
+                        temp_audio.write(uploaded_audio.getvalue())
+                        temp_audio_path = temp_audio.name
+                    
+                    try:
+                        with st.spinner("正在转换为 16kHz WAV 并使用 Whisper 离线转录..."):
+                            tmp_dir = tempfile.mkdtemp(prefix="webui_transcribe_")
+                            try:
+                                if transcribe.is_native_format(temp_audio_path):
+                                    audio_to_process = temp_audio_path
+                                else:
+                                    audio_to_process = transcribe.convert_to_wav(temp_audio_path, tmp_dir)
+                                
+                                with tempfile.NamedTemporaryFile(delete=False, suffix="") as temp_txt_base:
+                                    txt_base_path = temp_txt_base.name
+                                
+                                txt_file, elapsed = transcribe.run_whisper(audio_to_process, txt_base_path)
+                                with open(txt_file, "r", encoding="utf-8") as f_txt:
+                                    transcribed_text = f_txt.read()
+                                
+                                try:
+                                    os.remove(txt_file)
+                                except OSError:
+                                    pass
+                            finally:
+                                shutil.rmtree(tmp_dir, ignore_errors=True)
+                                try:
+                                    os.remove(temp_audio_path)
+                                except OSError:
+                                    pass
+                        
+                        if not transcribed_text.strip():
+                            st.error("转录完成，但内容为空，请检查音频文件。")
+                        else:
+                            st.success(f"转录成功！耗时: {transcribe.format_duration(elapsed)}")
+                            input_path = write_web_input(transcribed_text, uploaded_audio.name)
+                            with st.spinner("正在初始化本地知识库..."):
+                                collection = load_collection()
+                            cancel_event = threading.Event()
+                            result_queue = queue.Queue()
+                            audit_thread = threading.Thread(
+                                target=run_audit_worker,
+                                args=(input_path, collection, cancel_event, result_queue),
+                                daemon=True,
+                            )
+                            st.session_state.audit_running = True
+                            st.session_state.audit_result = None
+                            st.session_state.audit_error = ""
+                            st.session_state.audit_input_path = input_path
+                            st.session_state.audit_cancel_event = cancel_event
+                            st.session_state.audit_queue = result_queue
+                            st.session_state.audit_thread = audit_thread
+                            audit_thread.start()
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"转录失败: {exc}")
+
+    with config_tab:
+        st.subheader("本地合规条款管理")
+        rule_dir = Path(app.CONFIG_DIR)
+        rule_dir.mkdir(parents=True, exist_ok=True)
+        rule_files = sorted([f.name for f in rule_dir.glob("*.txt")])
+        
+        if rule_files:
+            selected_file = st.selectbox("选择要修改或查看的条款文件", rule_files)
+            file_path = rule_dir / selected_file
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read()
+            except Exception:
+                file_content = ""
+                
+            edited_content = st.text_area("文件内容编辑", value=file_content, height=250, key="edit_area")
+            
+            edit_cols = st.columns(2)
+            if edit_cols[0].button("保存条款修改", key="save_edit_btn"):
+                try:
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(edited_content)
+                    st.success(f"保存成功：{selected_file}")
+                    with st.spinner("正在重新构建语义向量库..."):
+                        app.rebuild_knowledge_base()
+                    st.success("语义向量库已同步重构！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"保存失败: {e}")
+                    
+            if edit_cols[1].button("删除该条款文件", type="secondary", key="del_edit_btn"):
+                try:
+                    os.remove(file_path)
+                    st.success(f"已删除：{selected_file}")
+                    with st.spinner("正在重新构建语义向量库..."):
+                        app.rebuild_knowledge_base()
+                    st.success("语义向量库已同步重构！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"删除失败: {e}")
+        else:
+            st.info("当前 compliance_rules 目录下没有规则条款文本文件。")
+            
+        st.markdown("---")
+        st.subheader("新建合规条款文件")
+        new_file_name = st.text_input("文件名 (例如: custom_rules.txt)", placeholder="必须以 .txt 结尾")
+        new_file_content = st.text_area("内容", height=150, placeholder="在此输入合规检查基准条款...")
+        
+        if st.button("创建并加载规则", type="primary", key="create_rule_btn"):
+            if not new_file_name.endswith(".txt"):
+                st.error("文件名必须以 .txt 结尾")
+            elif not new_file_name.strip():
+                st.error("文件名不能为空")
+            elif not new_file_content.strip():
+                st.error("内容不能为空")
+            else:
+                new_file_path = rule_dir / new_file_name.strip()
+                try:
+                    with open(new_file_path, "w", encoding="utf-8") as f:
+                        f.write(new_file_content)
+                    st.success(f"创建成功：{new_file_name}")
+                    with st.spinner("正在重新构建语义向量库..."):
+                        app.rebuild_knowledge_base()
+                    st.success("语义向量库已构建！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"创建失败: {e}")
 
     source_text = uploaded_text.strip() if uploaded_text else pasted_text.strip()
     source_name = uploaded_file.name if uploaded_file is not None else "webui_input.txt"
