@@ -501,6 +501,36 @@ class AppTests(unittest.TestCase):
         sleep_mock.assert_called_once_with(0.2)
         poll_mock.assert_called_once_with()
 
+    def test_build_risk_items_extracts_and_masks_sensitive_entities(self):
+        entities = [
+            {"entity_type": "客户名称", "entity_value": "张女士"},
+            {"entity_type": "员工信息", "entity_value": "研发小李"},
+        ]
+        risks = audit_rules.build_risk_items(
+            text="会议正常",
+            tasks=[],
+            source_file="demo.txt",
+            sensitive_entities=entities,
+        )
+        sensitive_risks = [r for r in risks if r["risk_type"] == "敏感信息"]
+        evidence = " ".join(str(r["evidence_masked"]) for r in sensitive_risks)
+        self.assertIn("客户名称: 张**", evidence)
+        self.assertIn("员工信息: 研***", evidence)
+        self.assertTrue(all(r["manual_review_required"] for r in sensitive_risks))
+
+    def test_build_risk_items_detects_model_uncertainty(self):
+        risks = audit_rules.build_risk_items(
+            text="会议正常",
+            tasks=[],
+            source_file="demo.txt",
+            model_confidence="Low",
+            uncertainty_reason="信息不全，无法定位合规条款。",
+        )
+        uncertain_risks = [r for r in risks if r["risk_type"] == "模型判定不确定"]
+        self.assertEqual(len(uncertain_risks), 1)
+        self.assertEqual(uncertain_risks[0]["evidence_masked"], "信息不全，无法定位合规条款。")
+        self.assertTrue(uncertain_risks[0]["manual_review_required"])
+
 
 if __name__ == "__main__":
     unittest.main()

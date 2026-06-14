@@ -77,7 +77,11 @@ def _risk_item(
     }
 
 
-def detect_sensitive_info(text: str, source_file: str) -> list[dict[str, Any]]:
+def detect_sensitive_info(
+    text: str,
+    source_file: str,
+    sensitive_entities: list[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
     risks: list[RiskItem] = []
     patterns = [
         ("手机号", MOBILE_PATTERN),
@@ -99,6 +103,30 @@ def detect_sensitive_info(text: str, source_file: str) -> list[dict[str, Any]]:
                     severity="High",
                     evidence_masked=mask_sensitive_value(raw_value, label),
                     recommendation="删除或脱敏后再流转，并确认共享范围是否合规。",
+                    manual_review_required=True,
+                    source_file=source_file,
+                )
+            )
+
+    if sensitive_entities:
+        seen_entities: set[str] = set()
+        for entity in sensitive_entities:
+            e_type = entity.get("entity_type", "敏感信息")
+            e_val = str(entity.get("entity_value", "")).strip()
+            if not e_val or e_val in seen_entities:
+                continue
+            seen_entities.add(e_val)
+
+            masked_val = e_val
+            if len(e_val) >= 2:
+                masked_val = e_val[0] + "*" * (len(e_val) - 1)
+
+            risks.append(
+                _risk_item(
+                    risk_type="敏感信息",
+                    severity="High",
+                    evidence_masked=f"{e_type}: {masked_val}",
+                    recommendation=f"涉及{e_type}，请评估是否符合内部安全脱敏规范。",
                     manual_review_required=True,
                     source_file=source_file,
                 )
@@ -197,14 +225,38 @@ def detect_cross_department_risks(text: str, source_file: str) -> list[dict[str,
     ]
 
 
+def detect_model_uncertainty(
+    model_confidence: str,
+    uncertainty_reason: str,
+    source_file: str,
+) -> list[dict[str, Any]]:
+    if str(model_confidence).lower() in ("medium", "low"):
+        reason = uncertainty_reason or "模型在审计或提取时置信度较低，可能存在信息模糊。"
+        return [
+            _risk_item(
+                risk_type="模型判定不确定",
+                severity="Medium",
+                evidence_masked=reason,
+                recommendation="由于上下文信息不完整或条款冲突，建议人工复核大模型审计结果的准确性。",
+                manual_review_required=True,
+                source_file=source_file,
+            )
+        ]
+    return []
+
+
 def build_risk_items(
     text: str,
     tasks: list[dict[str, Any]],
     source_file: str,
+    sensitive_entities: list[dict[str, Any]] = None,
+    model_confidence: str = "High",
+    uncertainty_reason: str = "",
 ) -> list[dict[str, Any]]:
     return [
-        *detect_sensitive_info(text, source_file),
+        *detect_sensitive_info(text, source_file, sensitive_entities),
         *detect_ambiguous_phrases(text, source_file),
         *detect_sop_gaps(tasks, text, source_file),
         *detect_cross_department_risks(text, source_file),
+        *detect_model_uncertainty(model_confidence, uncertainty_reason, source_file),
     ]
