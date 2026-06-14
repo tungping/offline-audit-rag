@@ -1,7 +1,7 @@
 # 📋 Offline Auto Audit
 
 > **100% 离线、零成本** 的本地企业合规审计系统。  
-> 自动监听录音音频或会议文本，对照合规标准进行审计，输出结构化任务派发表与 Markdown 报告。
+> 自动监听录音音频或会议文本，对照合规标准进行审计，输出任务指派 CSV、风险项 CSV 与 Markdown 审计报告组成的审计包。
 
 ---
 
@@ -44,7 +44,7 @@ nomic-embed-text  ──►  ChromaDB (本地向量库)
     ├────────────────────────┘
     │
     ▼
-output/*.csv (任务指派表) & output/*.md (审计报告)
+output/*_tasks.csv + *_risk_items.csv + *_audit_report.md
     │
     ▼
 archive/ (成功归档) 或 failed/ (失败隔离)
@@ -73,7 +73,7 @@ offline_auto_audit/
 │
 ├── recordings/                   # 📥 放入待转录音频文件
 ├── inbox/                        # 📥 投入待审文件（.txt，transcribe.py 也会自动输出到此）
-├── output/                       # 📤 审计结果输出（.csv + .md）
+├── output/                       # 📤 审计包输出（任务 CSV + 风险 CSV + 审计报告）
 ├── archive/                      # 🗄️  处理成功后的原文件/音频归档（在 .gitignore 中）
 ├── failed/                       # ⚠️  解析/转录失败的文件隔离区（在 .gitignore 中）
 │
