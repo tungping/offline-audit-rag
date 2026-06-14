@@ -12,6 +12,7 @@
 - 🧠 **RAG 增强审计**：通过语义检索自动匹配最相关合规条款，审计精准有据可查。
 - 🧭 **数据治理风险检查**：自动识别手机号、邮箱、身份证等敏感信息，以及模糊表述、SOP 缺口、跨部门责任不清和人工复核项。
 - 📄 **审计包输出**：同时生成任务指派 CSV、风险项 CSV 与 Markdown 审计报告，方便演示企业内部数据合规和流程治理场景。
+- 🖥️ **WebUI 演示界面**：支持粘贴文本或上传 TXT，浏览器内查看风险项、任务表、审计报告，并可中途停止审计。
 - 🔄 **端到端持续轮询**：监听目录自动触发。放入音频文件 -> 自动转录至 `inbox/` -> 自动触发合规分析，无需人工干预。
 - 🛡️ **文件安全分流**：成功 -> `archive/`，失败 -> `failed/`，原始文件绝不丢失。
 - ⌨️ **优雅/安全退出**：运行期间均可随时按 `ESC` 键等待当前文件处理完成后安全退出。
@@ -142,12 +143,31 @@ uv sync
 uv run streamlit run webui.py
 ```
 
+启动后打开 Streamlit 显示的本地地址，通常是：
+
+```text
+http://localhost:8501
+```
+
 WebUI 支持：
 
 - 粘贴会议记录 / SOP / 任务指派文本
 - 上传 `.txt` 文件
+- 点击 **开始审计** 后显示运行中转圈提示
+- 审计过程中点击 **停止审计**，中断本次任务并回到可重新开始状态
 - 在线查看风险项表格、任务表格和 Markdown 审计报告
 - 下载任务 CSV、风险项 CSV 和 Markdown 审计报告
+
+推荐演示流程：
+
+1. 启动 Ollama，并确保 `qwen3.5:9b` 与 `nomic-embed-text` 已下载。
+2. 运行 `uv run streamlit run webui.py`。
+3. 使用页面默认样例，或粘贴一段包含会议记录、SOP 缺口、模糊表述和敏感信息的文本。
+4. 点击 **开始审计**，观察运行中转圈提示。
+5. 如需展示可控中断，点击 **停止审计**。
+6. 审计完成后查看风险项、任务表和审计报告，并下载 CSV / Markdown 文件。
+
+> WebUI 面向演示和单次审计体验；如需批量自动处理，请使用下方 `app.py` 监听 `inbox/` 的完整工作流。
 
 ---
 
@@ -159,10 +179,10 @@ WebUI 支持：
 
 ```bash
 # 终端 1：启动转录守护程序 (监听 recordings/ 并输出至 inbox/)
-.venv/bin/python transcribe.py
+uv run python transcribe.py
 
 # 终端 2：启动合规审计守护程序 (监听 inbox/ 并输出至 output/)
-.venv/bin/python app.py
+uv run python app.py
 ```
 
 ### 详细步骤：
@@ -220,7 +240,7 @@ WebUI 支持：
 **运行示例**：
 ```bash
 # 强制使用中文识别，并指定 large 模型
-WHISPER_LANGUAGE=zh WHISPER_MODEL=~/whisper.cpp/models/ggml-large-v3.bin .venv/bin/python transcribe.py
+WHISPER_LANGUAGE=zh WHISPER_MODEL=~/whisper.cpp/models/ggml-large-v3.bin uv run python transcribe.py
 ```
 
 ### 2. 合规审计配置 (`app.py`)
@@ -232,20 +252,58 @@ WHISPER_LANGUAGE=zh WHISPER_MODEL=~/whisper.cpp/models/ggml-large-v3.bin .venv/b
 - **并发性能**：
   ```bash
   # 向量库构建时的 embedding 并发度，默认 2。根据机器性能可调整为 1 ~ 3
-  EMBEDDING_CONCURRENCY=2 .venv/bin/python app.py
+  EMBEDDING_CONCURRENCY=2 uv run python app.py
   ```
+
+---
+
+## 📦 输出文件说明
+
+每次审计成功后，`output/` 目录会生成一组审计包文件：
+
+| 文件 | 内容 |
+|------|------|
+| `*_tasks.csv` | 结构化任务清单，包括任务名称、负责人、截止日期、验收标准、优先级等字段 |
+| `*_risk_items.csv` | 风险项清单，包括风险类型、严重级别、证据片段、整改建议和是否需要人工复核 |
+| `*_audit_report.md` | Markdown 审计报告，整合合规结论、RAG 参考基准、任务表和风险项 |
+
+敏感字段会在报告、CSV 和输出文件名中尽量脱敏，例如手机号、邮箱和身份证号不会以完整明文展示。
+
+---
+
+## 🧪 测试
+
+项目使用 `pytest`，推荐在提交前运行：
+
+```bash
+uv run pytest
+```
+
+也可以运行标准库 `unittest` 入口：
+
+```bash
+uv run python -m unittest tests.test_app -v
+```
+
+当前测试覆盖重点包括：
+
+- 数据治理规则识别：敏感信息、模糊表述、SOP 缺口、跨部门协作风险
+- 审计输出生成：任务 CSV、风险项 CSV、Markdown 报告
+- 脱敏逻辑：报告、CSV、日志和输出文件名不泄露完整敏感字段
+- WebUI 停止审计底层取消通道
 
 ---
 
 ## 🖥️ 运行时交互
 
-这两个守护脚本都支持友好的终端交互：
+守护脚本和 WebUI 都支持友好的运行时交互：
 
 | 操作 | 效果 |
 |------|------|
 | 放入文件到监听目录 | 自动触发处理（轮询间隔 3 秒） |
-| 按 `ESC` 键 | **安全退出**：等待当前正在处理的文件/音频完成后安全退出 |
-| 按 `Ctrl+C` | **强制退出**：立即退出，当前正在处理的文件不会被归档，保留在原监听目录中 |
+| WebUI 点击 **停止审计** | 中断当前 WebUI 审计任务，不生成审计包 |
+| 守护脚本按 `ESC` 键 | **安全退出**：等待当前正在处理的文件/音频完成后安全退出 |
+| 守护脚本按 `Ctrl+C` | **强制退出**：立即退出，当前正在处理的文件不会被归档，保留在原监听目录中 |
 
 ---
 
