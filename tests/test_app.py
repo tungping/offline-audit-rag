@@ -297,6 +297,45 @@ class AppTests(unittest.TestCase):
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
+    def test_process_file_with_result_can_be_cancelled(self, mock_generate, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        mock_generate.return_value = [
+            {'response': '{"compliance_risk": "低", '},
+            {'response': '"audit_summary": "无违规", "tasks": []}'},
+        ]
+
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 严禁直接向 master 推送代码。']],
+            'distances': [[0.2]]
+        }
+
+        calls = {"count": 0}
+
+        def cancel_after_first_chunk():
+            calls["count"] += 1
+            return calls["count"] > 1
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "cancel_demo.txt")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write("本次会议流程正常，无异常事项。")
+
+            with mock.patch('app.OUTPUT', test_output):
+                result = app.process_file_with_result(
+                    test_file,
+                    mock_collection,
+                    cancel_checker=cancel_after_first_chunk,
+                )
+
+            self.assertFalse(result.success)
+            self.assertTrue(result.cancelled)
+            self.assertEqual(os.listdir(test_output), [])
+
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
     def test_process_file_with_result_returns_output_paths(self, mock_generate, mock_embeddings):
         mock_embeddings.return_value = {'embedding': [0.1] * 768}
         mock_generate.return_value = [

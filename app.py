@@ -98,6 +98,7 @@ class ProcessResult:
     tasks_csv_path: str = ""
     risk_csv_path: str = ""
     report_path: str = ""
+    cancelled: bool = False
 
 
 def count_tokens(text):
@@ -443,7 +444,7 @@ def mask_dataframe_text_columns(df):
     return masked_df
 
 
-def process_file_with_result(file_path, collection, progress_prefix=""):
+def process_file_with_result(file_path, collection, progress_prefix="", cancel_checker=None):
     """
     对单个文件执行完整的 RAG 审计流程。
     """
@@ -480,6 +481,10 @@ def process_file_with_result(file_path, collection, progress_prefix=""):
             progress_prefix = f"正在分析: {os.path.basename(file_path)}"
 
         for chunk in response_stream:
+            if cancel_checker is not None and cancel_checker():
+                print(f"\r{progress_prefix}... 已取消   \n")
+                logging.info(f"工作流【{os.path.basename(file_path)}】已取消。")
+                return ProcessResult(success=False, cancelled=True)
             token = chunk.get("response", "")
             full_response += token
             print(f"\r{progress_prefix}... {spinner[spinner_idx]} ", end="", flush=True)
