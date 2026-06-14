@@ -419,6 +419,17 @@ def mask_markdown_text(value):
     return audit_rules.mask_sensitive_evidence(str(value))
 
 
+def mask_dataframe_text_columns(df):
+    masked_df = df.copy()
+    for column in masked_df.select_dtypes(include=["object", "string"]).columns:
+        masked_df[column] = masked_df[column].map(
+            lambda value: audit_rules.mask_sensitive_evidence(value)
+            if isinstance(value, str)
+            else value
+        )
+    return masked_df
+
+
 def process_file(file_path, collection, progress_prefix=""):
     """
     对单个文件执行完整的 RAG 审计流程。
@@ -523,6 +534,8 @@ def process_file(file_path, collection, progress_prefix=""):
         else:
             risk_df["audit_time"] = audit_time
             risk_df = risk_df.reindex(columns=risk_columns)
+        task_output_df = mask_dataframe_text_columns(df)
+        risk_output_df = mask_dataframe_text_columns(risk_df)
 
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
@@ -531,12 +544,12 @@ def process_file(file_path, collection, progress_prefix=""):
         csv_path = unique_file_path(
             os.path.join(OUTPUT, f"{base_name}_{time_suffix}_tasks.csv")
         )
-        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        task_output_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
         risk_csv_path = unique_file_path(
             os.path.join(OUTPUT, f"{base_name}_{time_suffix}_risk_items.csv")
         )
-        risk_df.to_csv(risk_csv_path, index=False, encoding="utf-8-sig")
+        risk_output_df.to_csv(risk_csv_path, index=False, encoding="utf-8-sig")
 
         # 6. 生成排版美观的 Markdown 合规审计报告
         md_content = f"""# 自动化合规审计与任务指派报告
@@ -570,7 +583,7 @@ def process_file(file_path, collection, progress_prefix=""):
 | 序号 | 任务名称 | 负责人 | 优先级 | 截止日期 | 审计生成时间 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 """
-        for idx, (_, row) in enumerate(df.iterrows(), 1):
+        for idx, (_, row) in enumerate(task_output_df.iterrows(), 1):
             md_content += (
                 f"| {idx} | {markdown_table_cell(mask_markdown_text(row.get('task_name')))} | "
                 f"{markdown_table_cell(mask_markdown_text(row.get('owner')))} | "
@@ -582,14 +595,14 @@ def process_file(file_path, collection, progress_prefix=""):
         md_content += """
 ## 四、数据合规与流程治理风险
 """
-        if risk_df.empty:
+        if risk_output_df.empty:
             md_content += "\n> 未检测到确定性数据治理风险项。\n"
         else:
             md_content += """
 | 序号 | 风险类型 | 等级 | 证据 | 整改建议 | 人工复核 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 """
-            for idx, (_, row) in enumerate(risk_df.iterrows(), 1):
+            for idx, (_, row) in enumerate(risk_output_df.iterrows(), 1):
                 manual_review = "是" if bool(row.get("manual_review_required")) else "否"
                 md_content += (
                     f"| {idx} | {markdown_table_cell(mask_markdown_text(row.get('risk_type')))} | "

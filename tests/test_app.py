@@ -139,7 +139,7 @@ class AppTests(unittest.TestCase):
             {'response': '  "compliance_risk": "高",\n'},
             {'response': '  "audit_summary": "测试汇总",\n'},
             {'response': '  "tasks": [\n'},
-            {'response': '    {"task_name": "测试任务", "owner": "张三", "priority": "High"}\n'},
+            {'response': '    {"task_name": "联系客户 13812345678", "owner": "zhangsan@example.com", "priority": "High"}\n'},
             {'response': '  ]\n'},
             {'response': '}\n'}
         ]
@@ -184,11 +184,17 @@ class AppTests(unittest.TestCase):
                 # 验证 CSV 字段与内容 (包含新增强的源文件和截止日期字段)
                 df = pd.read_csv(os.path.join(test_output, tasks_csv_file))
                 self.assertEqual(len(df), 1)
-                self.assertEqual(df.loc[0, 'task_name'], '测试任务')
-                self.assertEqual(df.loc[0, 'owner'], '张三')
+                self.assertEqual(df.loc[0, 'task_name'], '联系客户 138****5678')
+                self.assertEqual(df.loc[0, 'owner'], 'z******n@example.com')
                 self.assertEqual(df.loc[0, 'priority'], 'High')
                 self.assertEqual(df.loc[0, 'source_file'], 'test_meeting.txt')
                 self.assertTrue('due_date' in df.columns)
+                with open(os.path.join(test_output, tasks_csv_file), 'r', encoding='utf-8-sig') as f_csv:
+                    task_csv_text = f_csv.read()
+                    self.assertIn("138****5678", task_csv_text)
+                    self.assertIn("z******n@example.com", task_csv_text)
+                    self.assertNotIn("13812345678", task_csv_text)
+                    self.assertNotIn("zhangsan@example.com", task_csv_text)
 
                 risk_df = pd.read_csv(os.path.join(test_output, risk_csv_file))
                 self.assertTrue({"risk_type", "severity", "evidence_masked", "recommendation", "manual_review_required"}.issubset(risk_df.columns))
@@ -197,13 +203,19 @@ class AppTests(unittest.TestCase):
                 self.assertIn("z******n@example.com", risk_evidence)
                 self.assertNotIn("13812345678", risk_evidence)
                 self.assertNotIn("zhangsan@example.com", risk_evidence)
+                with open(os.path.join(test_output, risk_csv_file), 'r', encoding='utf-8-sig') as f_csv:
+                    risk_csv_text = f_csv.read()
+                    self.assertIn("138****5678", risk_csv_text)
+                    self.assertIn("z******n@example.com", risk_csv_text)
+                    self.assertNotIn("13812345678", risk_csv_text)
+                    self.assertNotIn("zhangsan@example.com", risk_csv_text)
                 
                 # 验证 MD 包含的报告内容和原始片段
                 with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
                     md_text = f_md.read()
                     self.assertIn("test_meeting.txt", md_text)
                     self.assertIn("测试汇总", md_text)
-                    self.assertIn("测试任务", md_text)
+                    self.assertIn("联系客户 138****5678", md_text)
                     self.assertIn("张三", md_text)
                     self.assertIn("四、数据合规与流程治理风险", md_text)
                     self.assertIn("五、会议原始文本摘要", md_text)
