@@ -5,13 +5,10 @@ import logging
 import os
 import queue
 import re
-import select
 import shutil
 import sys
-import termios
 import threading
 import time
-import tty
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -683,7 +680,7 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
 | :--- | :--- | :--- | :--- | :--- | :--- |
 """
             for idx, (_, row) in enumerate(risk_output_df.iterrows(), 1):
-                manual_review = "是" if bool(row.get("manual_review_required")) else "否"
+                manual_review = "是" if str(row.get("manual_review_required", "")).lower() in ("true", "1", "yes") else "否"
                 md_content += (
                     f"| {idx} | {markdown_table_cell(mask_markdown_text(row.get('risk_type')))} | "
                     f"{markdown_table_cell(mask_markdown_text(row.get('severity')))} | "
@@ -749,7 +746,14 @@ def check_ollama_status() -> dict[str, Any]:
     try:
         client = ollama.Client()
         models_info = client.list()
-        models = [m.get("model") or m.get("name") for m in models_info.get("models", [])]
+        models = []
+        for m in models_info.get("models", []):
+            name = (
+                getattr(m, "model", None)
+                or (m.get("model") if isinstance(m, dict) else None)
+                or str(m)
+            )
+            models.append(name)
         
         audit_model_ok = AUDIT_MODEL in models or any(m.startswith(AUDIT_MODEL + ":") for m in models)
         embed_model_ok = EMBED_MODEL in models or any(m.startswith(EMBED_MODEL + ":") for m in models)
@@ -811,6 +815,14 @@ def check_exit_or_sleep(timeout=POLL_INTERVAL):
     is_tty = os.isatty(fd)
 
     if not is_tty:
+        time.sleep(timeout)
+        return False
+
+    try:
+        import select
+        import termios
+        import tty
+    except ImportError:
         time.sleep(timeout)
         return False
 

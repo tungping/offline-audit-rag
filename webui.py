@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import ollama
 import pandas as pd
 import streamlit as st
 
@@ -225,7 +226,6 @@ def main() -> None:
         status = app.check_ollama_status()
         if status["connected"]:
             st.success("Ollama 服务: 已连接")
-            import ollama
             if status["audit_model_ok"]:
                 st.success("审计模型: 就绪")
             else:
@@ -327,6 +327,10 @@ def main() -> None:
                                 shutil.rmtree(tmp_dir, ignore_errors=True)
                                 try:
                                     os.remove(temp_audio_path)
+                                except OSError:
+                                    pass
+                                try:
+                                    os.remove(txt_base_path)
                                 except OSError:
                                     pass
                         

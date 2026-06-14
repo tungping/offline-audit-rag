@@ -14,15 +14,12 @@ import json
 import logging
 import os
 import queue
-import select
 import shutil
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
-import tty
 
 from dotenv import load_dotenv
 from watchdog.events import FileSystemEventHandler
@@ -432,6 +429,14 @@ def check_exit_or_sleep(timeout=POLL_INTERVAL):
     """
     fd = sys.stdin.fileno()
     if not os.isatty(fd):
+        time.sleep(timeout)
+        return False
+
+    try:
+        import select
+        import termios
+        import tty
+    except ImportError:
         time.sleep(timeout)
         return False
 
