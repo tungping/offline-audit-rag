@@ -419,6 +419,10 @@ def mask_markdown_text(value):
     return audit_rules.mask_sensitive_evidence(str(value))
 
 
+def mask_output_basename(base_name):
+    return audit_rules.mask_sensitive_evidence(base_name).replace("*", "x")
+
+
 def mask_dataframe_text_columns(df):
     masked_df = df.copy()
     for column in masked_df.select_dtypes(include=["object", "string"]).columns:
@@ -537,7 +541,7 @@ def process_file(file_path, collection, progress_prefix=""):
         task_output_df = mask_dataframe_text_columns(df)
         risk_output_df = mask_dataframe_text_columns(risk_df)
 
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        base_name = mask_output_basename(os.path.splitext(os.path.basename(file_path))[0])
         time_suffix = time.strftime("%Y-%m-%d_%H_%M")
 
         # 保存 CSV 任务指派表
@@ -638,8 +642,9 @@ def process_file(file_path, collection, progress_prefix=""):
     except Exception as e:
         logging.exception(f"文件处理失败: {e}")
         if full_response:
+            masked_preview = audit_rules.mask_sensitive_evidence(full_response[:500])
             logging.error(
-                f"--- 原始模型输出预览 --- \n{full_response[:500]}\n------------------------"
+                f"--- 原始模型输出预览 --- \n{masked_preview}\n------------------------"
             )
         return False
 

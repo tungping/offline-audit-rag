@@ -227,6 +227,76 @@ class AppTests(unittest.TestCase):
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
+    def test_process_file_masks_malformed_model_output_preview_in_logs(self, mock_generate, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        mock_generate.return_value = [
+            {'response': '{"tasks": [{"task_name": "联系客户 13812345678", '},
+            {'response': '"owner": "zhangsan@example.com", "priority": "High"}]'},
+        ]
+
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 严禁直接向 master 推送代码。']],
+            'distances': [[0.2]]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "malformed_model_output.txt")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write("客户手机号 13812345678，邮箱 zhangsan@example.com，需要安排回访。")
+
+            with mock.patch('app.OUTPUT', test_output):
+                with self.assertLogs(level="ERROR") as log_cm:
+                    success = app.process_file(test_file, mock_collection)
+
+        self.assertFalse(success)
+        logs = "\n".join(log_cm.output)
+        self.assertIn("--- 原始模型输出预览 ---", logs)
+        self.assertIn("138****5678", logs)
+        self.assertIn("z******n@example.com", logs)
+        self.assertNotIn("13812345678", logs)
+        self.assertNotIn("zhangsan@example.com", logs)
+
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
+    def test_process_file_masks_sensitive_values_in_output_filenames(self, mock_generate, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        mock_generate.return_value = [
+            {'response': '{"compliance_risk": "低", "audit_summary": "无违规", "tasks": []}'},
+        ]
+
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 严禁直接向 master 推送代码。']],
+            'distances': [[0.2]]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "客户_13812345678_zhangsan@example.com.txt")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write("本次会议流程正常，无异常事项。")
+
+            with mock.patch('app.OUTPUT', test_output):
+                success = app.process_file(test_file, mock_collection)
+
+            self.assertTrue(success)
+            out_files = os.listdir(test_output)
+            self.assertEqual(len(out_files), 3)
+            self.assertTrue(any(filename.endswith("_tasks.csv") for filename in out_files))
+            self.assertTrue(any(filename.endswith("_risk_items.csv") for filename in out_files))
+            self.assertTrue(any(filename.endswith("_audit_report.md") for filename in out_files))
+
+            filenames = "\n".join(out_files)
+            self.assertNotIn("13812345678", filenames)
+            self.assertNotIn("zhangsan@example.com", filenames)
+            self.assertNotIn("*", filenames)
+
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
     def test_process_file_with_no_rag_results(self, mock_generate, mock_embeddings):
         """RAG 全部低于阈值时，审计应仍正常完成，Markdown 报告包含警告。"""
         mock_embeddings.return_value = {'embedding': [0.1] * 768}
