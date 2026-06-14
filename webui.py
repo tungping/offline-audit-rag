@@ -249,8 +249,9 @@ def main() -> None:
         st.warning("已发送停止请求，正在等待当前模型流式输出中断。")
 
     if st.session_state.audit_running:
-        st.info("正在审计中，可以点击“停止审计”中断本次任务。")
-        time.sleep(1)
+        with st.spinner("正在执行本地审计..."):
+            st.info("正在审计中，可以点击“停止审计”中断本次任务。")
+            time.sleep(1)
         st.rerun()
 
     result = st.session_state.audit_result
