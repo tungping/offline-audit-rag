@@ -44,7 +44,13 @@ def load_collection():
 def read_uploaded_text(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
-    return uploaded_file.getvalue().decode("utf-8-sig")
+    content = uploaded_file.getvalue()
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "big5"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("无法识别 TXT 文件编码，请另存为 UTF-8 后重新上传。")
 
 
 def write_web_input(text: str, filename: str) -> str:
@@ -268,7 +274,11 @@ def main() -> None:
 
     with upload_tab:
         uploaded_file = st.file_uploader("选择 .txt 文件", type=["txt"])
-        uploaded_text = read_uploaded_text(uploaded_file)
+        try:
+            uploaded_text = read_uploaded_text(uploaded_file)
+        except ValueError as exc:
+            uploaded_text = ""
+            st.error(str(exc))
         if uploaded_text:
             st.text_area("文件内容预览", value=uploaded_text, height=220)
 

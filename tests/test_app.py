@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -118,6 +119,20 @@ class AppTests(unittest.TestCase):
         self.assertIn("任务缺少明确负责人: 处理数据导出脚本", evidence)
         self.assertIn("缺少明确截止时间", evidence)
         self.assertIn("缺少验收标准或交付物定义", evidence)
+
+    def test_build_risk_items_detects_missing_deadline_per_task(self):
+        text = "今天开会。李四处理数据导出脚本。王五周五提交发布报告。验收标准是完成回归验证。"
+        tasks = [
+            {"task_name": "处理数据导出脚本", "owner": "李四", "priority": "High"},
+            {"task_name": "提交发布报告", "owner": "王五", "priority": "Medium"},
+        ]
+
+        risks = audit_rules.build_risk_items(text, tasks, "demo.txt")
+
+        sop_risks = [item for item in risks if item["risk_type"] == "SOP缺失"]
+        evidence = {item["evidence_masked"] for item in sop_risks}
+        self.assertIn("任务缺少明确截止时间: 处理数据导出脚本", evidence)
+        self.assertNotIn("任务缺少明确截止时间: 提交发布报告", evidence)
 
     def test_build_risk_items_detects_cross_department_risk_without_confirmer(self):
         text = "产品、法务、研发和销售一起看一下客户数据导出方案，没问题就上线。"
@@ -407,6 +422,39 @@ class AppTests(unittest.TestCase):
                     self.assertIn("RELEVANCE_THRESHOLD", md_text)
                     self.assertNotIn("参考规范 1", md_text)
 
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
+    def test_process_file_bounds_long_audit_prompt(self, mock_generate, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        mock_generate.return_value = [
+            {'response': '{"compliance_risk": "低", "audit_summary": "无违规", "tasks": []}'},
+        ]
+
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 严禁直接向 master 推送代码。']],
+            'distances': [[0.2]]
+        }
+
+        long_text = "开头敏感会议内容。" + ("中间会议记录。" * 7000) + "结尾关键整改要求。"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "long_meeting.txt")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(long_text)
+
+            with mock.patch('app.OUTPUT', test_output):
+                result = app.process_file_with_result(test_file, mock_collection)
+
+        self.assertTrue(result.success)
+        sent_prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertLessEqual(app.count_tokens(sent_prompt), 6000)
+        self.assertIn("开头敏感会议内容", sent_prompt)
+        self.assertIn("结尾关键整改要求", sent_prompt)
+        self.assertIn("已省略", sent_prompt)
+
     def test_extract_json_object_fixes_trailing_commas(self):
         # trailing comma in list and in dict
         malformed = '{"tasks": [{"a": 1,},], "summary": "ok",}'
@@ -474,6 +522,22 @@ class AppTests(unittest.TestCase):
                 self.assertFalse(webui.is_safe_rule_filename(name))
 
         self.assertTrue(webui.is_safe_rule_filename("custom_rules.txt"))
+
+    def test_gitignore_ignores_local_compliance_rule_files(self):
+        ignore_status = subprocess.run(
+            ["git", "check-ignore", "config/compliance_rules/new_rule.txt"],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(ignore_status.returncode, 0)
+
+    def test_webui_read_uploaded_text_accepts_common_chinese_encoding(self):
+        class UploadedFile:
+            def getvalue(self):
+                return "中文会议记录".encode("gb18030")
+
+        self.assertEqual(webui.read_uploaded_text(UploadedFile()), "中文会议记录")
 
     def test_webui_sync_knowledge_base_cache_clears_cached_collection(self):
         clear_mock = mock.Mock()

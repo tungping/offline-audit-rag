@@ -48,6 +48,7 @@ EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
 AUDIT_MODEL = os.getenv("AUDIT_MODEL", "qwen3.5:9b")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
+AUDIT_INPUT_TOKEN_LIMIT = int(os.getenv("AUDIT_INPUT_TOKEN_LIMIT", "6000"))
 
 # 事件循环与队列
 file_queue = queue.Queue()
@@ -204,6 +205,50 @@ def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
         merged_chunks.append("\n".join(current_group))
 
     return merged_chunks
+
+
+def bound_audit_prompt_content(text: str, max_tokens: int = AUDIT_INPUT_TOKEN_LIMIT) -> str:
+    """
+    Keep oversized meeting notes inside the model context while preserving the
+    beginning and final action items, which often carry the most audit signal.
+    """
+    if count_tokens(text) <= max_tokens:
+        return text
+
+    chunks = recursive_split_text(text, chunk_size=800, chunk_overlap=0)
+    if not chunks:
+        return text[:max_tokens]
+
+    notice = (
+        "【输入过长，已按原文顺序保留部分片段用于审计；"
+        "中间超出上下文窗口的内容已省略。】\n"
+    )
+    omitted_notice = "\n【已省略部分中间内容】\n"
+    tail = chunks[-1]
+    selected = [notice]
+    remaining = max_tokens - count_tokens(notice) - count_tokens(omitted_notice) - count_tokens(tail)
+
+    for chunk in chunks[:-1]:
+        chunk_tokens = count_tokens(chunk)
+        if chunk_tokens + 2 > remaining:
+            break
+        selected.append(chunk)
+        remaining -= chunk_tokens + 2
+
+    selected.extend([omitted_notice, tail])
+    bounded_text = "\n\n".join(selected)
+
+    while count_tokens(bounded_text) > max_tokens and len(selected) > 3:
+        selected.pop(-3)
+        bounded_text = "\n\n".join(selected)
+
+    if count_tokens(bounded_text) > max_tokens:
+        half = max(1, (max_tokens - count_tokens(notice) - count_tokens(omitted_notice)) // 2)
+        head = "".join(recursive_split_text(text, chunk_size=half, chunk_overlap=0)[:1])
+        tail = "".join(recursive_split_text(text, chunk_size=half, chunk_overlap=0)[-1:])
+        bounded_text = "\n\n".join([notice, head, omitted_notice, tail])
+
+    return bounded_text
 
 
 async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
@@ -514,9 +559,10 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
 
         # 3. 本地大模型推理并流式监听
         logging.info(f"大模型分析中 (模型: {AUDIT_MODEL})，如需强制退出请按 Ctrl+C")
+        audit_prompt_content = bound_audit_prompt_content(content)
         response_stream = ollama.generate(
             model=AUDIT_MODEL,
-            prompt=content,
+            prompt=audit_prompt_content,
             system=system_prompt,
             options={"temperature": 0.1, "num_ctx": 8192, "num_keep": 0},
             stream=True,

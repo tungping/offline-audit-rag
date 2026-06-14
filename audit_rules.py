@@ -25,6 +25,7 @@ AMBIGUOUS_PHRASES = ["尽快", "后续跟进", "相关人员", "看情况", "有
 DEPARTMENT_KEYWORDS = ["产品", "研发", "法务", "销售", "财务", "运营", "客服"]
 CONFIRMATION_KEYWORDS = ["确认人", "审批人", "负责人", "Owner", "owner"]
 ACCEPTANCE_KEYWORDS = ["验收", "标准", "完成定义", "交付物"]
+TASK_DEADLINE_FIELDS = ["deadline", "due_date", "due_time", "截止时间", "完成时间"]
 
 
 def mask_sensitive_value(value: str, risk_type: str) -> str:
@@ -154,6 +155,41 @@ def detect_ambiguous_phrases(text: str, source_file: str) -> list[dict[str, Any]
     return risks
 
 
+def _split_sentences(text: str) -> list[str]:
+    return [
+        sentence.strip()
+        for sentence in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", text)
+        if sentence.strip()
+    ]
+
+
+def _task_contexts(task: dict[str, Any], text: str) -> list[str]:
+    owner = str(task.get("owner", "")).strip()
+    task_name = str(task.get("task_name", "")).strip()
+    anchors = [anchor for anchor in (owner, task_name) if anchor and anchor != "Unassigned"]
+    task_fragments = [
+        fragment
+        for fragment in re.split(r"[\s,，。！？!?；;、/]+", task_name)
+        if len(fragment) >= 2
+    ]
+    anchors.extend(task_fragments)
+
+    contexts = []
+    for sentence in _split_sentences(text):
+        if any(anchor and anchor in sentence for anchor in anchors):
+            contexts.append(sentence)
+    return contexts
+
+
+def _task_has_deadline(task: dict[str, Any], text: str) -> bool:
+    for field in TASK_DEADLINE_FIELDS:
+        value = str(task.get(field, "")).strip()
+        if value and value.lower() not in {"nan", "none", "null", "无", "未定"}:
+            return True
+
+    return any(DATE_TIME_PATTERN.search(context) for context in _task_contexts(task, text))
+
+
 def detect_sop_gaps(
     tasks: list[dict[str, Any]],
     text: str,
@@ -176,7 +212,34 @@ def detect_sop_gaps(
                 )
             )
 
-    if not DATE_TIME_PATTERN.search(text):
+    if tasks:
+        missing_deadline_tasks = []
+        for task in tasks:
+            if not _task_has_deadline(task, text):
+                task_name = str(task.get("task_name", "")).strip() or "未命名任务"
+                missing_deadline_tasks.append(task_name)
+                risks.append(
+                    _risk_item(
+                        risk_type="SOP缺失",
+                        severity="Medium",
+                        evidence_masked=f"任务缺少明确截止时间: {task_name}",
+                        recommendation="补充明确负责人、截止时间和验收标准。",
+                        manual_review_required=False,
+                        source_file=source_file,
+                    )
+                )
+        if missing_deadline_tasks and not DATE_TIME_PATTERN.search(text):
+            risks.append(
+                _risk_item(
+                    risk_type="SOP缺失",
+                    severity="Medium",
+                    evidence_masked="缺少明确截止时间",
+                    recommendation="补充明确负责人、截止时间和验收标准。",
+                    manual_review_required=False,
+                    source_file=source_file,
+                )
+            )
+    elif not DATE_TIME_PATTERN.search(text):
         risks.append(
             _risk_item(
                 risk_type="SOP缺失",

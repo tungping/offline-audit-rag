@@ -21,5 +21,7 @@ __pycache__/
 
 # 不参与版本控制的变更日志目录
 changes/
-docs/
+
+# 本地配置与设计/计划文档
 config/
+docs/
