@@ -377,4 +377,4 @@ A：强烈建议显式指定 `WHISPER_LANGUAGE=zh`，这样可以引导模型优
 
 ## 📄 License
 
-CC0
+This project is licensed under the terms of the GNU General Public License v3.0 (GPL-3.0). See the [LICENSE](LICENSE) file for the full license text.
