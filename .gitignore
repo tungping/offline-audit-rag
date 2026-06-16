@@ -25,3 +25,6 @@ changes/
 # 本地配置与设计/计划文档
 config/
 docs/
+
+# Agent state
+agent-state.json
