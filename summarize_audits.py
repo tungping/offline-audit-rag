@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+HISTORY_FILENAME = "audit_history.jsonl"
 
 
 def _truthy(value: Any) -> bool:
@@ -84,14 +88,88 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _read_history_entries(output_dir: str | Path) -> list[dict[str, Any]]:
+    history_path = Path(output_dir) / HISTORY_FILENAME
+    if not history_path.exists():
+        return []
+
+    entries = []
+    for line in history_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entries.append(json.loads(line))
+    return entries
+
+
+def summarize_history(output_dir: str | Path) -> dict[str, Any]:
+    entries = _read_history_entries(output_dir)
+    risk_type_counts: Counter[str] = Counter()
+    severity_counts: Counter[str] = Counter()
+
+    for entry in entries:
+        risk_type_counts.update(entry.get("risk_type_counts", {}))
+        severity_counts.update(entry.get("severity_counts", {}))
+
+    return {
+        "audit_count": len(entries),
+        "task_count": int(sum(entry.get("task_count", 0) for entry in entries)),
+        "risk_count": int(sum(entry.get("risk_count", 0) for entry in entries)),
+        "high_risk_count": int(sum(entry.get("high_risk_count", 0) for entry in entries)),
+        "manual_review_count": int(sum(entry.get("manual_review_count", 0) for entry in entries)),
+        "risk_type_counts": dict(risk_type_counts),
+        "severity_counts": dict(severity_counts),
+        "recent_entries": entries[-10:][::-1],
+    }
+
+
+def render_history_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Audit History Summary",
+        "",
+        "## Overview",
+        "",
+        "| Metric | Value |",
+        "| :--- | ---: |",
+        f"| Audit runs | {summary['audit_count']} |",
+        f"| Tasks extracted | {summary['task_count']} |",
+        f"| Risks detected | {summary['risk_count']} |",
+        f"| High risks | {summary['high_risk_count']} |",
+        f"| Manual review items | {summary['manual_review_count']} |",
+        "",
+        _markdown_count_table("Risk Type Breakdown", summary["risk_type_counts"]),
+        "",
+        _markdown_count_table("Severity Breakdown", summary["severity_counts"]),
+        "",
+        "## Recent Audits",
+        "",
+        "| Source | Audit time | Tasks | Risks | High risks | Manual review |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: |",
+    ]
+    if not summary["recent_entries"]:
+        lines.append("| None | - | 0 | 0 | 0 | 0 |")
+    else:
+        for entry in summary["recent_entries"]:
+            lines.append(
+                f"| {entry.get('source_file', '')} | {entry.get('audit_time', '')} | "
+                f"{int(entry.get('task_count', 0))} | {int(entry.get('risk_count', 0))} | "
+                f"{int(entry.get('high_risk_count', 0))} | {int(entry.get('manual_review_count', 0))} |"
+            )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize Offline Auto Audit CSV outputs.")
     parser.add_argument("--output-dir", default="output", help="Directory containing audit CSV outputs.")
     parser.add_argument("--write", help="Optional markdown path to write the summary report.")
+    parser.add_argument("--history", action="store_true", help="Summarize audit_history.jsonl instead of scanning CSV files.")
     args = parser.parse_args()
 
-    summary = summarize_output_dir(args.output_dir)
-    markdown = render_summary_markdown(summary)
+    if args.history:
+        summary = summarize_history(args.output_dir)
+        markdown = render_history_markdown(summary)
+    else:
+        summary = summarize_output_dir(args.output_dir)
+        markdown = render_summary_markdown(summary)
 
     if args.write:
         write_path = Path(args.write)

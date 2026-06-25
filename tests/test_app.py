@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -191,7 +192,7 @@ class AppTests(unittest.TestCase):
                 # 4. 验证成功标志与生成文件
                 self.assertTrue(success)
                 
-                out_files = os.listdir(test_output)
+                out_files = [name for name in os.listdir(test_output) if name != "audit_history.jsonl"]
                 self.assertEqual(len(out_files), 3)
                 
                 tasks_csv_file = [f for f in out_files if f.endswith('_tasks.csv')][0]
@@ -301,7 +302,7 @@ class AppTests(unittest.TestCase):
                 success = app.process_file(test_file, mock_collection)
 
             self.assertTrue(success)
-            out_files = os.listdir(test_output)
+            out_files = [name for name in os.listdir(test_output) if name != "audit_history.jsonl"]
             self.assertEqual(len(out_files), 3)
             self.assertTrue(any(filename.endswith("_tasks.csv") for filename in out_files))
             self.assertTrue(any(filename.endswith("_risk_items.csv") for filename in out_files))
@@ -413,15 +414,15 @@ class AppTests(unittest.TestCase):
                 success = app.process_file(test_file, mock_collection)
                 self.assertTrue(success)
 
-                out_files = os.listdir(test_output)
-                md_file = [f for f in out_files if f.endswith('_audit_report.md')][0]
+            out_files = [name for name in os.listdir(test_output) if name != "audit_history.jsonl"]
+            md_file = [f for f in out_files if f.endswith('_audit_report.md')][0]
 
-                with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
-                    md_text = f_md.read()
-                    # 验证 MD 报告包含 RAG 零结果警告
-                    self.assertIn("⚠️", md_text)
-                    self.assertIn("RELEVANCE_THRESHOLD", md_text)
-                    self.assertNotIn("参考规范 1", md_text)
+            with open(os.path.join(test_output, md_file), 'r', encoding='utf-8') as f_md:
+                md_text = f_md.read()
+                # 验证 MD 报告包含 RAG 零结果警告
+                self.assertIn("⚠️", md_text)
+                self.assertIn("RELEVANCE_THRESHOLD", md_text)
+                self.assertNotIn("参考规范 1", md_text)
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
@@ -581,6 +582,86 @@ class AppTests(unittest.TestCase):
         self.assertEqual(summary["severity_counts"]["Medium"], 1)
         self.assertEqual(summary["risk_type_counts"]["敏感信息"], 2)
         self.assertEqual(summary["manual_review_count"], 2)
+
+    @mock.patch('app.ollama.embeddings')
+    @mock.patch('app.ollama.generate')
+    def test_process_file_records_audit_history(self, mock_generate, mock_embeddings):
+        mock_embeddings.return_value = {'embedding': [0.1] * 768}
+        mock_generate.return_value = [
+            {'response': '{"compliance_risk": "高", "audit_summary": "需整改", "tasks": [{"task_name": "补充评审", "owner": "李四", "priority": "High"}]}'},
+        ]
+
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            'documents': [['【条款 1】: 严禁直接向 master 推送代码。']],
+            'distances': [[0.2]]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "history_demo.txt")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write("张三直接 push 到 main，客户手机号 13812345678 需要同步销售。")
+
+            with mock.patch('app.OUTPUT', test_output):
+                result = app.process_file_with_result(test_file, mock_collection)
+
+            self.assertTrue(result.success)
+            history_path = Path(test_output) / "audit_history.jsonl"
+            entries = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["source_file"], "history_demo.txt")
+        self.assertEqual(entry["task_count"], 1)
+        self.assertGreaterEqual(entry["risk_count"], 1)
+        self.assertGreaterEqual(entry["high_risk_count"], 1)
+        self.assertIn("敏感信息", entry["risk_type_counts"])
+        self.assertTrue(entry["tasks_csv_path"].endswith("_tasks.csv"))
+        self.assertTrue(entry["risk_csv_path"].endswith("_risk_items.csv"))
+        self.assertTrue(entry["report_path"].endswith("_audit_report.md"))
+
+    def test_summarize_audit_history_reads_jsonl_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            history_path = output_dir / "audit_history.jsonl"
+            entries = [
+                {
+                    "audit_time": "2026-06-25 10:00:00",
+                    "source_file": "a.txt",
+                    "task_count": 1,
+                    "risk_count": 2,
+                    "high_risk_count": 1,
+                    "manual_review_count": 1,
+                    "risk_type_counts": {"敏感信息": 2},
+                },
+                {
+                    "audit_time": "2026-06-25 11:00:00",
+                    "source_file": "b.txt",
+                    "task_count": 0,
+                    "risk_count": 1,
+                    "high_risk_count": 0,
+                    "manual_review_count": 0,
+                    "risk_type_counts": {"SOP缺失": 1},
+                },
+            ]
+            history_path.write_text(
+                "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = summarize_audits.summarize_history(output_dir)
+            markdown = summarize_audits.render_history_markdown(summary)
+
+        self.assertEqual(summary["audit_count"], 2)
+        self.assertEqual(summary["task_count"], 1)
+        self.assertEqual(summary["risk_count"], 3)
+        self.assertEqual(summary["high_risk_count"], 1)
+        self.assertEqual(summary["manual_review_count"], 1)
+        self.assertEqual(summary["risk_type_counts"]["敏感信息"], 2)
+        self.assertIn("| a.txt | 2026-06-25 10:00:00 | 1 | 2 | 1 | 1 |", markdown)
+        self.assertIn("| 敏感信息 | 2 |", markdown)
 
     def test_render_summary_markdown_includes_portfolio_metrics(self):
         summary = {

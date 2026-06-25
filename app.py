@@ -39,6 +39,7 @@ ARCHIVE = os.path.join(BASE_DIR, "archive")
 FAILED = os.path.join(BASE_DIR, "failed")
 CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
 VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
+AUDIT_HISTORY_FILENAME = "audit_history.jsonl"
 
 # 并发与重试
 EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "2"))
@@ -537,6 +538,52 @@ def mask_dataframe_text_columns(df):
     return masked_df
 
 
+def record_audit_history(
+    source_file: str,
+    audit_time: str,
+    task_output_df: pd.DataFrame,
+    risk_output_df: pd.DataFrame,
+    tasks_csv_path: str,
+    risk_csv_path: str,
+    report_path: str,
+) -> None:
+    history_path = os.path.join(OUTPUT, AUDIT_HISTORY_FILENAME)
+    severity_counts = (
+        risk_output_df["severity"].value_counts().to_dict()
+        if "severity" in risk_output_df.columns
+        else {}
+    )
+    risk_type_counts = (
+        risk_output_df["risk_type"].value_counts().to_dict()
+        if "risk_type" in risk_output_df.columns
+        else {}
+    )
+    manual_review_count = 0
+    if "manual_review_required" in risk_output_df.columns:
+        manual_review_count = int(
+            risk_output_df["manual_review_required"]
+            .map(lambda value: str(value).strip().lower() in {"true", "1", "yes", "y", "是"})
+            .sum()
+        )
+
+    entry = {
+        "audit_time": audit_time,
+        "source_file": mask_markdown_text(source_file),
+        "task_count": int(len(task_output_df)),
+        "risk_count": int(len(risk_output_df)),
+        "high_risk_count": int(severity_counts.get("High", 0)),
+        "manual_review_count": manual_review_count,
+        "severity_counts": {str(key): int(value) for key, value in severity_counts.items()},
+        "risk_type_counts": {str(key): int(value) for key, value in risk_type_counts.items()},
+        "tasks_csv_path": os.path.basename(tasks_csv_path),
+        "risk_csv_path": os.path.basename(risk_csv_path),
+        "report_path": os.path.basename(report_path),
+    }
+
+    with open(history_path, "a", encoding="utf-8") as history_file:
+        history_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def process_file_with_result(file_path, collection, progress_prefix="", cancel_checker=None):
     """
     对单个文件执行完整的 RAG 审计流程。
@@ -752,6 +799,16 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
         )
         with open(md_path, "w", encoding="utf-8") as f_md:
             f_md.write(md_content)
+
+        record_audit_history(
+            source_file=source_file,
+            audit_time=audit_time,
+            task_output_df=task_output_df,
+            risk_output_df=risk_output_df,
+            tasks_csv_path=csv_path,
+            risk_csv_path=risk_csv_path,
+            report_path=md_path,
+        )
 
         logging.info(
             f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。"

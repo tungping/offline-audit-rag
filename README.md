@@ -25,12 +25,19 @@
 - **RAG 审计**：从本地合规条款中检索相关基准，再交给本地大模型完成审计与任务提取。
 - **数据治理自动化**：自动识别手机号、邮箱、身份证、客户名称、员工信息、SOP 缺口和跨部门协作风险。
 - **结构化分析输出**：生成任务 CSV、风险 CSV、Markdown 报告，并可进一步汇总成指标报告。
+- **审计历史统计**：每次审计完成后自动追加 `output/audit_history.jsonl`，便于查看风险类型、高风险和人工复核趋势。
 - **可测试工程实现**：核心清洗、脱敏、取消、汇总和输出逻辑有自动化测试覆盖。
 
 批量汇总已有审计输出：
 
 ```bash
 uv run python summarize_audits.py --output-dir output --write output/portfolio_summary.md
+```
+
+汇总审计历史索引：
+
+```bash
+uv run python summarize_audits.py --output-dir output --history --write output/audit_history_summary.md
 ```
 
 ---
@@ -192,6 +199,7 @@ WebUI 支持：
 - 点击 **开始审计** 后显示运行中转圈提示（已解决每秒闪烁跳动的问题）
 - 审计过程中点击 **停止审计**，中断本次任务并回到可重新开始状态
 - 在线查看风险项表格、任务表格和 Markdown 审计报告
+- 在 **历史统计** 页查看累计审计次数、风险类型分布和最近审计记录
 - 下载任务 CSV、风险项 CSV 和 Markdown 审计报告
 
 推荐演示流程：

@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import app
+import summarize_audits
 import transcribe
 
 
@@ -209,6 +210,34 @@ def render_outputs(result: app.ProcessResult) -> None:
         )
 
 
+def render_history() -> None:
+    summary = summarize_audits.summarize_history(app.OUTPUT)
+    if summary["audit_count"] == 0:
+        st.info("还没有历史审计记录。完成一次审计后，这里会显示风险分布和最近记录。")
+        return
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("审计次数", summary["audit_count"])
+    metric_cols[1].metric("任务数", summary["task_count"])
+    metric_cols[2].metric("风险项", summary["risk_count"])
+    metric_cols[3].metric("高风险", summary["high_risk_count"])
+    metric_cols[4].metric("人工复核", summary["manual_review_count"])
+
+    risk_type_df = pd.DataFrame(
+        [
+            {"risk_type": risk_type, "count": count}
+            for risk_type, count in summary["risk_type_counts"].items()
+        ]
+    )
+    if not risk_type_df.empty:
+        st.subheader("问题类型分布")
+        risk_type_df = risk_type_df.sort_values("count", ascending=False)
+        st.dataframe(risk_type_df, width="stretch", hide_index=True)
+
+    st.subheader("最近审计")
+    st.dataframe(pd.DataFrame(summary["recent_entries"]), width="stretch", hide_index=True)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Offline Auto Audit",
@@ -261,8 +290,8 @@ def main() -> None:
             st.error("Ollama 服务: 离线")
             st.info("请检查 Ollama 服务是否启动 (例如运行 `ollama serve`)。")
 
-    input_tab, upload_tab, audio_tab, config_tab = st.tabs(
-        ["粘贴文本", "上传 TXT", "上传音频", "合规条款管理"]
+    input_tab, upload_tab, audio_tab, history_tab, config_tab = st.tabs(
+        ["粘贴文本", "上传 TXT", "上传音频", "历史统计", "合规条款管理"]
     )
 
     with input_tab:
@@ -369,6 +398,9 @@ def main() -> None:
                             st.rerun()
                     except Exception as exc:
                         st.error(f"转录失败: {exc}")
+
+    with history_tab:
+        render_history()
 
     with config_tab:
         st.subheader("本地合规条款管理")
