@@ -37,9 +37,9 @@ def init_audit_state() -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def load_collection():
+def load_collection(mode: str = app.COMPLIANCE_MODE):
     app.check_environment()
-    return app.initialize_knowledge_base()
+    return app.initialize_knowledge_base(mode)
 
 
 def read_uploaded_text(uploaded_file) -> str:
@@ -104,6 +104,7 @@ def run_audit_worker(
     collection,
     cancel_event: threading.Event,
     result_queue,
+    mode: str = app.COMPLIANCE_MODE,
 ) -> None:
     try:
         result = app.process_file_with_result(
@@ -111,6 +112,7 @@ def run_audit_worker(
             collection,
             progress_prefix="WebUI 审计",
             cancel_checker=cancel_event.is_set,
+            mode=mode,
         )
         result_queue.put(("result", result))
     except Exception as exc:
@@ -160,6 +162,56 @@ def render_outputs(result: app.ProcessResult) -> None:
     tasks_df = pd.read_csv(result.tasks_csv_path)
     risks_df = pd.read_csv(result.risk_csv_path)
     report_text = read_text(result.report_path)
+
+    if result.mode == app.SEMICONDUCTOR_IP_MODE:
+        high_risk_count = (
+            int((risks_df["severity"] == "High").sum())
+            if "severity" in risks_df.columns
+            else 0
+        )
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("技术特征", len(tasks_df))
+        metric_cols[1].metric("IP风险项", len(risks_df))
+        metric_cols[2].metric("高风险", high_risk_count)
+
+        risk_tab, claim_tab, report_tab, download_tab = st.tabs(
+            ["IP风险项", "Claim Chart", "分析报告", "下载"]
+        )
+
+        with risk_tab:
+            st.dataframe(risks_df, width="stretch", hide_index=True)
+
+        with claim_tab:
+            st.dataframe(tasks_df, width="stretch", hide_index=True)
+
+        with report_tab:
+            st.markdown(report_text)
+
+        with download_tab:
+            download_cols = st.columns(3)
+            download_cols[0].download_button(
+                "下载 Claim Chart CSV",
+                data=read_bytes(result.tasks_csv_path),
+                file_name=os.path.basename(result.tasks_csv_path),
+                mime="text/csv",
+                width="stretch",
+            )
+            download_cols[1].download_button(
+                "下载 IP风险 CSV",
+                data=read_bytes(result.risk_csv_path),
+                file_name=os.path.basename(result.risk_csv_path),
+                mime="text/csv",
+                width="stretch",
+            )
+            download_cols[2].download_button(
+                "下载分析报告",
+                data=read_bytes(result.report_path),
+                file_name=os.path.basename(result.report_path),
+                mime="text/markdown",
+                width="stretch",
+            )
+        return
 
     high_risk_count = (
         int((risks_df["severity"] == "High").sum())
@@ -290,13 +342,24 @@ def main() -> None:
             st.error("Ollama 服务: 离线")
             st.info("请检查 Ollama 服务是否启动 (例如运行 `ollama serve`)。")
 
+        st.markdown("---")
+        selected_mode = st.selectbox(
+            "分析模式",
+            options=[app.COMPLIANCE_MODE, app.SEMICONDUCTOR_IP_MODE],
+            format_func=lambda value: "企业合规审计"
+            if value == app.COMPLIANCE_MODE
+            else "半导体专利/IP技术情报",
+        )
+
     input_tab, upload_tab, audio_tab, history_tab, config_tab = st.tabs(
         ["粘贴文本", "上传 TXT", "上传音频", "历史统计", "合规条款管理"]
     )
 
     with input_tab:
         pasted_text = st.text_area(
-            "会议记录 / SOP / 任务指派文本",
+            "会议记录 / SOP / 任务指派文本"
+            if selected_mode == app.COMPLIANCE_MODE
+            else "公开专利文本 / 技术交底 / 产品说明 / 论文摘要",
             value=DEMO_TEXT,
             height=220,
         )
@@ -379,7 +442,7 @@ def main() -> None:
                             st.success(f"转录成功！耗时: {transcribe.format_duration(elapsed)}")
                             input_path = write_web_input(transcribed_text, uploaded_audio.name)
                             with st.spinner("正在初始化本地知识库..."):
-                                collection = load_collection()
+                                collection = load_collection(app.COMPLIANCE_MODE)
                             cancel_event = threading.Event()
                             result_queue = queue.Queue()
                             audit_thread = threading.Thread(
@@ -486,12 +549,12 @@ def main() -> None:
 
         input_path = write_web_input(source_text, source_name)
         with st.spinner("正在初始化本地知识库..."):
-            collection = load_collection()
+            collection = load_collection(selected_mode)
         cancel_event = threading.Event()
         result_queue = queue.Queue()
         audit_thread = threading.Thread(
             target=run_audit_worker,
-            args=(input_path, collection, cancel_event, result_queue),
+            args=(input_path, collection, cancel_event, result_queue, selected_mode),
             daemon=True,
         )
         st.session_state.audit_running = True

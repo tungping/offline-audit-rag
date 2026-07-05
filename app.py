@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import datetime
 import json
@@ -38,8 +39,12 @@ OUTPUT = os.path.join(BASE_DIR, "output")
 ARCHIVE = os.path.join(BASE_DIR, "archive")
 FAILED = os.path.join(BASE_DIR, "failed")
 CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
+SEMICONDUCTOR_IP_CONFIG_DIR = os.path.join(BASE_DIR, "config", "semiconductor_ip_rules")
 VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
 AUDIT_HISTORY_FILENAME = "audit_history.jsonl"
+COMPLIANCE_MODE = "compliance"
+SEMICONDUCTOR_IP_MODE = "semiconductor_ip"
+SUPPORTED_AUDIT_MODES = {COMPLIANCE_MODE, SEMICONDUCTOR_IP_MODE}
 
 # 并发与重试
 EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "2"))
@@ -113,6 +118,29 @@ class ProcessResult:
     risk_csv_path: str = ""
     report_path: str = ""
     cancelled: bool = False
+    mode: str = COMPLIANCE_MODE
+
+
+def normalize_audit_mode(mode: str | None) -> str:
+    selected = (mode or os.getenv("AUDIT_MODE") or COMPLIANCE_MODE).strip()
+    if selected not in SUPPORTED_AUDIT_MODES:
+        raise ValueError(
+            f"Unsupported audit mode: {selected}. "
+            f"Expected one of: {', '.join(sorted(SUPPORTED_AUDIT_MODES))}"
+        )
+    return selected
+
+
+def rules_dir_for_mode(mode: str) -> str:
+    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
+        return SEMICONDUCTOR_IP_CONFIG_DIR
+    return CONFIG_DIR
+
+
+def collection_name_for_mode(mode: str) -> str:
+    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
+        return "semiconductor_ip_rules"
+    return "compliance_rules"
 
 
 def count_tokens(text):
@@ -275,23 +303,25 @@ async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
     return results
 
 
-def initialize_knowledge_base():
+def initialize_knowledge_base(mode: str = COMPLIANCE_MODE):
     """
-    检查并初始化 ChromaDB 本地向量库。如果库中无数据，读取 config 下合规手册切片后写入。
+    检查并初始化 ChromaDB 本地向量库。如果库中无数据，读取对应模式规则切片后写入。
     """
+    mode = normalize_audit_mode(mode)
+    rules_dir = rules_dir_for_mode(mode)
     client = chromadb.PersistentClient(path=VECTOR_STORE_DIR)
-    collection = client.get_or_create_collection(name="compliance_rules")
+    collection = client.get_or_create_collection(name=collection_name_for_mode(mode))
 
     if collection.count() > 0:
-        logging.info("本地向量数据库已检测到合规数据，跳过向量库构建。")
+        logging.info("本地向量数据库已检测到 %s 数据，跳过向量库构建。", mode)
         return collection
 
-    logging.info("本地向量数据库为空，开始读取合规手册...")
+    logging.info("本地向量数据库为空，开始读取 %s 规则...", mode)
 
-    files = sorted([f for f in os.listdir(CONFIG_DIR) if f.endswith(".txt")])
-    if not files:
+    files = sorted([f for f in os.listdir(rules_dir) if f.endswith(".txt")])
+    if not files and mode == COMPLIANCE_MODE:
         default_rule_path = os.path.join(
-            CONFIG_DIR, "standard_pmo_compliance_rules.txt"
+            rules_dir, "standard_pmo_compliance_rules.txt"
         )
         default_rules = """标准研发及发布合规规范手册（PMO Compliance Standard）：
 
@@ -316,12 +346,27 @@ def initialize_knowledge_base():
         files = [os.path.basename(default_rule_path)]
         logging.info(f"已为您自动生成默认合规规范文本: {default_rule_path}")
 
+    if not files and mode == SEMICONDUCTOR_IP_MODE:
+        default_rule_path = os.path.join(rules_dir, "sic_power_device_terms.txt")
+        default_rules = """SiC功率半导体IP初筛规则：
+
+1. 只基于输入文本和检索规则做技术情报整理，不输出法律意见。
+2. 优先拆解权利要求或核心技术特征中的结构、材料、步骤、功能和技术效果。
+3. 每个关键判断尽量给出原文证据；证据不足时标记人工复核。
+4. 不得输出确定侵权、确定不侵权、专利有效或专利无效结论。
+5. SiC MOSFET 分析重点包括 trench gate、drift layer、gate oxide reliability、on-resistance、breakdown voltage、thermal resistance 和 edge termination。
+"""
+        with open(default_rule_path, "w", encoding="utf-8") as f_def:
+            f_def.write(default_rules)
+        files = [os.path.basename(default_rule_path)]
+        logging.info("已自动生成默认半导体IP规则文本: %s", default_rule_path)
+
     documents = []
     ids = []
     chunk_counter = 0
 
     for file in files:
-        file_path = os.path.join(CONFIG_DIR, file)
+        file_path = os.path.join(rules_dir, file)
         with open(file_path, "r", encoding="utf-8") as f_in:
             text_content = f_in.read()
 
@@ -337,7 +382,7 @@ def initialize_knowledge_base():
         return collection
 
     logging.info(
-        f"已生成 {len(documents)} 个合规切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB..."
+        f"已生成 {len(documents)} 个 {mode} 切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB..."
     )
 
     embeddings: Any = asyncio.run(_fetch_embeddings_async(documents))
@@ -538,6 +583,363 @@ def mask_dataframe_text_columns(df):
     return masked_df
 
 
+SEMICONDUCTOR_IP_DISCLAIMER = (
+    "本报告仅用于技术情报整理、专利文本理解和IP初筛，不构成法律意见、"
+    "侵权判断、专利有效性判断或投资建议。所有结论均需由具备资质的专业人士复核。"
+)
+SEMICONDUCTOR_CLAIM_COLUMNS = [
+    "claim_id",
+    "element_id",
+    "technical_feature",
+    "structure_or_step",
+    "function_effect",
+    "evidence_quote",
+    "possible_variant",
+    "confidence",
+    "needs_human_review",
+]
+SEMICONDUCTOR_RISK_COLUMNS = [
+    "risk_type",
+    "severity",
+    "related_claim_or_paragraph",
+    "evidence_quote",
+    "reason",
+    "suggested_follow_up",
+    "needs_human_review",
+]
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "是"}
+
+
+def _choice(value: Any, allowed: set[str], default: str) -> str:
+    normalized = _clean_text(value).lower()
+    for item in allowed:
+        if normalized == item.lower():
+            return item
+    return default
+
+
+def validate_semiconductor_ip_result(result: dict[str, Any]) -> dict[str, Any]:
+    data = result if isinstance(result, dict) else {}
+    claim_rows = data.get("claim_chart")
+    risk_rows = data.get("risk_items")
+    route_rows = data.get("technology_routes")
+    questions = data.get("follow_up_questions")
+
+    if not isinstance(claim_rows, list):
+        claim_rows = []
+    if not isinstance(risk_rows, list):
+        risk_rows = []
+    if not isinstance(route_rows, list):
+        route_rows = []
+    if not isinstance(questions, list):
+        questions = []
+
+    clean_claim_rows = []
+    for row in claim_rows:
+        source = row if isinstance(row, dict) else {}
+        evidence = _clean_text(source.get("evidence_quote"))
+        clean_claim_rows.append(
+            {
+                "claim_id": _clean_text(source.get("claim_id")),
+                "element_id": _clean_text(source.get("element_id")),
+                "technical_feature": _clean_text(source.get("technical_feature")),
+                "structure_or_step": _clean_text(source.get("structure_or_step")),
+                "function_effect": _clean_text(source.get("function_effect")),
+                "evidence_quote": evidence,
+                "possible_variant": _clean_text(source.get("possible_variant")),
+                "confidence": _choice(source.get("confidence"), {"High", "Medium", "Low"}, "Medium"),
+                "needs_human_review": _truthy(source.get("needs_human_review")) or not evidence,
+            }
+        )
+
+    clean_risk_rows = []
+    for row in risk_rows:
+        source = row if isinstance(row, dict) else {}
+        evidence = _clean_text(source.get("evidence_quote"))
+        clean_risk_rows.append(
+            {
+                "risk_type": _clean_text(source.get("risk_type")),
+                "severity": _choice(source.get("severity"), {"High", "Medium", "Low"}, "Medium"),
+                "related_claim_or_paragraph": _clean_text(source.get("related_claim_or_paragraph")),
+                "evidence_quote": evidence,
+                "reason": _clean_text(source.get("reason")),
+                "suggested_follow_up": _clean_text(source.get("suggested_follow_up")),
+                "needs_human_review": _truthy(source.get("needs_human_review")) or not evidence,
+            }
+        )
+
+    clean_routes = []
+    for row in route_rows:
+        source = row if isinstance(row, dict) else {}
+        clean_routes.append(
+            {
+                "route_name": _clean_text(source.get("route_name")),
+                "description": _clean_text(source.get("description")),
+                "supporting_evidence": _clean_text(source.get("supporting_evidence")),
+                "related_players_or_products": _clean_text(source.get("related_players_or_products")),
+            }
+        )
+
+    return {
+        "technical_topic": _clean_text(data.get("technical_topic")),
+        "material_type": _clean_text(data.get("material_type")),
+        "summary": _clean_text(data.get("summary")),
+        "claim_chart": clean_claim_rows,
+        "risk_items": clean_risk_rows,
+        "technology_routes": clean_routes,
+        "follow_up_questions": [_clean_text(item) for item in questions if _clean_text(item)],
+        "disclaimer": _clean_text(data.get("disclaimer")) or SEMICONDUCTOR_IP_DISCLAIMER,
+    }
+
+
+def build_semiconductor_ip_system_prompt(retrieved_docs: list[str]) -> str:
+    rules_context = "\n\n".join(
+        [f"【规则 {i + 1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)]
+    )
+    return f"""你是半导体知识产权与技术情报分析助手。
+
+基于用户输入文本和检索到的规则，完成半导体专利/IP技术情报初筛。
+
+检索规则：
+{rules_context}
+
+严格限制：
+1. 只能基于输入文本和检索规则进行分析。
+2. 不得编造不存在的技术特征、公司、专利号或法律结论。
+3. 不得输出确定侵权、确定不侵权、专利有效或专利无效结论。
+4. 每个关键判断尽量给出原文证据片段。
+5. 如果证据不足，必须标记 needs_human_review = true。
+6. 输出必须是可解析 JSON，不要输出 Markdown。
+
+请输出一个 JSON object，字段如下：
+{{
+  "technical_topic": "string",
+  "material_type": "string",
+  "summary": "string",
+  "claim_chart": [
+    {{
+      "claim_id": "string",
+      "element_id": "string",
+      "technical_feature": "string",
+      "structure_or_step": "string",
+      "function_effect": "string",
+      "evidence_quote": "string",
+      "possible_variant": "string",
+      "confidence": "High/Medium/Low",
+      "needs_human_review": true
+    }}
+  ],
+  "risk_items": [
+    {{
+      "risk_type": "string",
+      "severity": "High/Medium/Low",
+      "related_claim_or_paragraph": "string",
+      "evidence_quote": "string",
+      "reason": "string",
+      "suggested_follow_up": "string",
+      "needs_human_review": true
+    }}
+  ],
+  "technology_routes": [
+    {{
+      "route_name": "string",
+      "description": "string",
+      "supporting_evidence": "string",
+      "related_players_or_products": "string"
+    }}
+  ],
+  "follow_up_questions": ["string"],
+  "disclaimer": "{SEMICONDUCTOR_IP_DISCLAIMER}"
+}}"""
+
+
+def _write_csv_rows(rows: list[dict[str, Any]], output_path: str, fieldnames: list[str]) -> None:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=fieldnames)
+    else:
+        df = df.reindex(columns=fieldnames)
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+
+def render_semiconductor_ip_report(
+    source_file: str,
+    audit_time: str,
+    content: str,
+    retrieved_docs: list[str],
+    data: dict[str, Any],
+    claim_df: pd.DataFrame,
+    risk_df: pd.DataFrame,
+) -> str:
+    lines = [
+        "# 半导体专利与技术情报分析报告",
+        "",
+        "## 一、输入材料概况",
+        "",
+        f"- **被处理文件**: `{mask_markdown_text(source_file)}`",
+        f"- **分析时间**: `{audit_time}`",
+        f"- **分析模式**: `{SEMICONDUCTOR_IP_MODE}`",
+        f"- **技术主题**: {mask_markdown_text(data['technical_topic'])}",
+        f"- **材料类型**: {mask_markdown_text(data['material_type'])}",
+        "",
+        "## 二、摘要",
+        "",
+        mask_markdown_text(data["summary"]) or "未返回摘要。",
+        "",
+        "## 三、RAG 规则依据",
+        "",
+    ]
+    if retrieved_docs:
+        for idx, doc in enumerate(retrieved_docs, 1):
+            lines.append(f"> **参考规则 {idx}**:")
+            lines.append(markdown_quote_block(mask_markdown_text(doc)))
+            lines.append("")
+    else:
+        lines.append("> 未命中半导体IP规则，结果需人工复核。")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## 四、核心权利要求 / 技术特征拆解",
+            "",
+            "| Claim ID | Element ID | 技术特征 | 结构/步骤 | 功能效果 | 证据 | 置信度 | 人工复核 |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+    )
+    for _, row in claim_df.iterrows():
+        lines.append(
+            f"| {markdown_table_cell(row.get('claim_id'))} | "
+            f"{markdown_table_cell(row.get('element_id'))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('technical_feature')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('structure_or_step')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('function_effect')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('evidence_quote')))} | "
+            f"{markdown_table_cell(row.get('confidence'))} | "
+            f"{'是' if _truthy(row.get('needs_human_review')) else '否'} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 五、技术/IP风险项",
+            "",
+            "| 风险类型 | 严重级别 | 相关位置 | 证据 | 原因 | 后续建议 | 人工复核 |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+    )
+    for _, row in risk_df.iterrows():
+        lines.append(
+            f"| {markdown_table_cell(mask_markdown_text(row.get('risk_type')))} | "
+            f"{markdown_table_cell(row.get('severity'))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('related_claim_or_paragraph')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('evidence_quote')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('reason')))} | "
+            f"{markdown_table_cell(mask_markdown_text(row.get('suggested_follow_up')))} | "
+            f"{'是' if _truthy(row.get('needs_human_review')) else '否'} |"
+        )
+
+    lines.extend(["", "## 六、相关技术路线", ""])
+    if data["technology_routes"]:
+        for route in data["technology_routes"]:
+            lines.append(
+                f"- **{mask_markdown_text(route['route_name'])}**: "
+                f"{mask_markdown_text(route['description'])}"
+            )
+            if route["supporting_evidence"]:
+                lines.append(f"  - 证据: {mask_markdown_text(route['supporting_evidence'])}")
+    else:
+        lines.append("未提取到明确技术路线。")
+
+    lines.extend(["", "## 七、后续检索建议", ""])
+    if data["follow_up_questions"]:
+        for question in data["follow_up_questions"]:
+            lines.append(f"- {mask_markdown_text(question)}")
+    else:
+        lines.append("- 人工复核 claim chart 与风险项证据是否充分。")
+
+    excerpt = mask_markdown_text(content[:500] + ("..." if len(content) > 500 else ""))
+    lines.extend(
+        [
+            "",
+            "## 八、输入原文片段",
+            "",
+            "```text",
+            excerpt,
+            "```",
+            "",
+            "## 九、免责声明",
+            "",
+            data["disclaimer"],
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_semiconductor_ip_outputs(
+    source_file: str,
+    content: str,
+    retrieved_docs: list[str],
+    data: dict[str, Any],
+) -> ProcessResult:
+    audit_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    base_name = mask_output_basename(os.path.splitext(source_file)[0])
+    time_suffix = time.strftime("%Y-%m-%d_%H_%M")
+
+    claim_csv_path = unique_file_path(
+        os.path.join(OUTPUT, f"{base_name}_{time_suffix}_claim_chart.csv")
+    )
+    risk_csv_path = unique_file_path(
+        os.path.join(OUTPUT, f"{base_name}_{time_suffix}_ip_risk_items.csv")
+    )
+    report_path = unique_file_path(
+        os.path.join(OUTPUT, f"{base_name}_{time_suffix}_ip_analysis_report.md")
+    )
+
+    _write_csv_rows(data["claim_chart"], claim_csv_path, SEMICONDUCTOR_CLAIM_COLUMNS)
+    _write_csv_rows(data["risk_items"], risk_csv_path, SEMICONDUCTOR_RISK_COLUMNS)
+
+    claim_df = pd.read_csv(claim_csv_path)
+    risk_df = pd.read_csv(risk_csv_path)
+    md_content = render_semiconductor_ip_report(
+        source_file=source_file,
+        audit_time=audit_time,
+        content=content,
+        retrieved_docs=retrieved_docs,
+        data=data,
+        claim_df=claim_df,
+        risk_df=risk_df,
+    )
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        report_file.write(md_content)
+
+    record_audit_history(
+        source_file=source_file,
+        audit_time=audit_time,
+        task_output_df=claim_df,
+        risk_output_df=risk_df,
+        tasks_csv_path=claim_csv_path,
+        risk_csv_path=risk_csv_path,
+        report_path=report_path,
+        mode=SEMICONDUCTOR_IP_MODE,
+    )
+
+    return ProcessResult(
+        success=True,
+        tasks_csv_path=claim_csv_path,
+        risk_csv_path=risk_csv_path,
+        report_path=report_path,
+        mode=SEMICONDUCTOR_IP_MODE,
+    )
+
+
 def record_audit_history(
     source_file: str,
     audit_time: str,
@@ -546,6 +948,7 @@ def record_audit_history(
     tasks_csv_path: str,
     risk_csv_path: str,
     report_path: str,
+    mode: str = COMPLIANCE_MODE,
 ) -> None:
     history_path = os.path.join(OUTPUT, AUDIT_HISTORY_FILENAME)
     severity_counts = (
@@ -559,15 +962,17 @@ def record_audit_history(
         else {}
     )
     manual_review_count = 0
+    review_column = ""
     if "manual_review_required" in risk_output_df.columns:
-        manual_review_count = int(
-            risk_output_df["manual_review_required"]
-            .map(lambda value: str(value).strip().lower() in {"true", "1", "yes", "y", "是"})
-            .sum()
-        )
+        review_column = "manual_review_required"
+    elif "needs_human_review" in risk_output_df.columns:
+        review_column = "needs_human_review"
+    if review_column:
+        manual_review_count = int(risk_output_df[review_column].map(_truthy).sum())
 
     entry = {
         "audit_time": audit_time,
+        "mode": mode,
         "source_file": mask_markdown_text(source_file),
         "task_count": int(len(task_output_df)),
         "risk_count": int(len(risk_output_df)),
@@ -584,25 +989,35 @@ def record_audit_history(
         history_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def process_file_with_result(file_path, collection, progress_prefix="", cancel_checker=None):
+def process_file_with_result(
+    file_path,
+    collection,
+    progress_prefix="",
+    cancel_checker=None,
+    mode: str = COMPLIANCE_MODE,
+):
     """
     对单个文件执行完整的 RAG 审计流程。
     """
+    mode = normalize_audit_mode(mode)
     full_response = ""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # 1. 语义检索合规基准
+        # 1. 语义检索模式规则
         retrieved_docs = retrieve_relevant_context(collection, content, top_k=3)
-        compliance_context = "\n\n".join(
-            [f"【条款 {i + 1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)]
-        )
 
         # 2. 组装 SYSTEM PROMPT
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            compliance_context=compliance_context
-        )
+        if mode == SEMICONDUCTOR_IP_MODE:
+            system_prompt = build_semiconductor_ip_system_prompt(retrieved_docs)
+        else:
+            compliance_context = "\n\n".join(
+                [f"【条款 {i + 1}】:\n{doc}" for i, doc in enumerate(retrieved_docs)]
+            )
+            system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+                compliance_context=compliance_context
+            )
 
         # 3. 本地大模型推理并流式监听
         logging.info(f"大模型分析中 (模型: {AUDIT_MODEL})，如需强制退出请按 Ctrl+C")
@@ -635,6 +1050,19 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
 
         # 4. 模型响应过滤与容错 JSON 解析
         data = json.loads(extract_json_object(full_response))
+        if mode == SEMICONDUCTOR_IP_MODE:
+            source_file = os.path.basename(file_path)
+            result = write_semiconductor_ip_outputs(
+                source_file=source_file,
+                content=content,
+                retrieved_docs=retrieved_docs,
+                data=validate_semiconductor_ip_result(data),
+            )
+            logging.info(
+                f"工作流【{os.path.basename(file_path)}】处理成功！结果已保存至 output/ 目录。"
+            )
+            return result
+
         if not isinstance(data.get("tasks"), list):
             data["tasks"] = []
         if not isinstance(data.get("sensitive_entities"), list):
@@ -808,6 +1236,7 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
             tasks_csv_path=csv_path,
             risk_csv_path=risk_csv_path,
             report_path=md_path,
+            mode=COMPLIANCE_MODE,
         )
 
         logging.info(
@@ -818,6 +1247,7 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
             tasks_csv_path=csv_path,
             risk_csv_path=risk_csv_path,
             report_path=md_path,
+            mode=COMPLIANCE_MODE,
         )
 
     except Exception as e:
@@ -830,14 +1260,22 @@ def process_file_with_result(file_path, collection, progress_prefix="", cancel_c
         return ProcessResult(success=False)
 
 
-def process_file(file_path, collection, progress_prefix=""):
-    result = process_file_with_result(file_path, collection, progress_prefix)
+def process_file(file_path, collection, progress_prefix="", mode: str = COMPLIANCE_MODE):
+    result = process_file_with_result(file_path, collection, progress_prefix, mode=mode)
     return result.success
 
 
 # 检查并自动构建文件夹环境
 def check_environment():
-    dirs = [INBOX, OUTPUT, ARCHIVE, FAILED, CONFIG_DIR, VECTOR_STORE_DIR]
+    dirs = [
+        INBOX,
+        OUTPUT,
+        ARCHIVE,
+        FAILED,
+        CONFIG_DIR,
+        SEMICONDUCTOR_IP_CONFIG_DIR,
+        VECTOR_STORE_DIR,
+    ]
     for d in dirs:
         os.makedirs(d, exist_ok=True)
 
@@ -878,16 +1316,17 @@ def check_ollama_status() -> dict[str, Any]:
         }
 
 
-def rebuild_knowledge_base():
+def rebuild_knowledge_base(mode: str = COMPLIANCE_MODE):
     """
     强制删除现有 collection 并重新构建向量库。
     """
+    mode = normalize_audit_mode(mode)
     client = chromadb.PersistentClient(path=VECTOR_STORE_DIR)
     try:
-        client.delete_collection(name="compliance_rules")
+        client.delete_collection(name=collection_name_for_mode(mode))
     except Exception:
         pass
-    return initialize_knowledge_base()
+    return initialize_knowledge_base(mode)
 
 
 def wait_for_file_ready(file_path, timeout=5, stable_interval=0.5):
@@ -977,7 +1416,20 @@ class InboxFileHandler(FileSystemEventHandler):
             file_queue.put(abs_path)
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run Offline Auto Audit.")
+    parser.add_argument(
+        "--mode",
+        choices=sorted(SUPPORTED_AUDIT_MODES),
+        default=os.getenv("AUDIT_MODE", COMPLIANCE_MODE),
+        help="Analysis mode. Defaults to AUDIT_MODE or compliance.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    audit_mode = normalize_audit_mode(args.mode)
     check_environment()
     
     ollama_status = check_ollama_status()
@@ -990,10 +1442,11 @@ if __name__ == "__main__":
             logging.warning(f"⚠️ 向量模型 {EMBED_MODEL} 未在 Ollama 中下载，运行可能会报错，建议运行 'ollama pull {EMBED_MODEL}'。")
 
     logging.info("正在连接本地向量库与初始化知识库...")
-    collection = initialize_knowledge_base()
+    collection = initialize_knowledge_base(audit_mode)
 
     logging.info("==========================================================")
     logging.info("🚀  本地 RAG 自动合规审计服务已就绪 (Event-Driven Edition)")
+    logging.info(f"   分析模式 : {audit_mode}")
     logging.info(f"   审计模型 : {AUDIT_MODEL}")
     logging.info(f"   嵌入模型 : {EMBED_MODEL}")
     logging.info(f"   语义阈值 : {RELEVANCE_THRESHOLD}")
@@ -1034,7 +1487,7 @@ if __name__ == "__main__":
                             continue
                         try:
                             # 对单个文件执行处理
-                            success = process_file(full_path, collection)
+                            success = process_file(full_path, collection, mode=audit_mode)
 
                             if success:
                                 safe_move(full_path, ARCHIVE)

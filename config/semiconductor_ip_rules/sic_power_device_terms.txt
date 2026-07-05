@@ -1,0 +1,19 @@
+SiC功率半导体基础词表：
+
+- SiC MOSFET
+- trench gate
+- planar gate
+- gate oxide reliability
+- on-resistance
+- breakdown voltage
+- body diode
+- short-circuit ruggedness
+- thermal resistance
+- edge termination
+- JFET region
+- drift layer
+- epitaxial layer
+- source region
+- drain electrode
+- gate dielectric
+- automotive-grade reliability

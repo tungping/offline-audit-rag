@@ -1,0 +1,4 @@
+claim_id,element_id,technical_feature,structure_or_step,function_effect,evidence_quote,possible_variant,confidence,needs_human_review
+1,1a,碳化硅衬底,器件包括碳化硅衬底,作为功率器件基础衬底,碳化硅衬底,,High,False
+1,1b,沟槽栅结构,沟槽侧壁和底部设置栅介质层且沟槽内设置栅电极,形成沟槽栅MOSFET控制结构,设置于所述沟槽侧壁和底部的栅介质层；设置于所述沟槽内的栅电极,,High,False
+1,1c,沟槽底部屏蔽区,沟槽底部设置屏蔽区,降低栅介质层处电场强度并改善栅氧可靠性,所述沟槽底部设置有屏蔽区，以降低栅介质层处的电场强度并改善栅氧可靠性,,High,False

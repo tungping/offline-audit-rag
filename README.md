@@ -18,6 +18,10 @@
 | 风险项 CSV | [`examples/sample_risk_items.csv`](examples/sample_risk_items.csv) |
 | Markdown 审计报告 | [`examples/sample_audit_report.md`](examples/sample_audit_report.md) |
 | 批量汇总报告 | [`examples/sample_portfolio_summary.md`](examples/sample_portfolio_summary.md) |
+| 半导体 IP synthetic demo | [`examples/semiconductor/sample_sic_patent.txt`](examples/semiconductor/sample_sic_patent.txt) |
+| 半导体 Claim Chart | [`examples/semiconductor/sample_ip_claim_chart.csv`](examples/semiconductor/sample_ip_claim_chart.csv) |
+| 半导体 IP 风险项 | [`examples/semiconductor/sample_ip_risk_items.csv`](examples/semiconductor/sample_ip_risk_items.csv) |
+| 半导体 IP 分析报告 | [`examples/semiconductor/sample_ip_analysis_report.md`](examples/semiconductor/sample_ip_analysis_report.md) |
 
 适合在简历或面试中强调的能力点：
 
@@ -25,6 +29,7 @@
 - **RAG 审计**：从本地合规条款中检索相关基准，再交给本地大模型完成审计与任务提取。
 - **数据治理自动化**：自动识别手机号、邮箱、身份证、客户名称、员工信息、SOP 缺口和跨部门协作风险。
 - **结构化分析输出**：生成任务 CSV、风险 CSV、Markdown 报告，并可进一步汇总成指标报告。
+- **半导体 IP 技术情报模式**：对 synthetic SiC MOSFET 专利/产品文本做权利要求拆解、FTO 初筛提示和可审校报告生成。
 - **审计历史统计**：每次审计完成后自动追加 `output/audit_history.jsonl`，便于查看风险类型、高风险和人工复核趋势。
 - **可测试工程实现**：核心清洗、脱敏、取消、汇总和输出逻辑有自动化测试覆盖。
 
@@ -49,6 +54,7 @@ uv run python summarize_audits.py --output-dir output --history --write output/a
 - 🧠 **RAG 增强审计**：通过语义检索自动匹配最相关合规条款，审计精准有据可查。
 - 🧭 **数据治理风险检查**：自动识别身份证、手机号、邮箱、客户名称、员工信息等敏感信息，以及符合 SOP（负责人/截止时间/验收标准）校验、模糊表述、跨部门协作风险和模型不确定性的人工复核项。
 - 📄 **审计包输出**：同时生成任务指派 CSV、风险项 CSV 与 Markdown 审计报告，方便演示企业内部数据合规和流程治理场景。
+- 🧩 **半导体 IP Intelligence Mode**：支持 `semiconductor_ip` 模式，面向公开专利文本、技术交底、产品说明和论文摘要生成 claim chart、IP 风险项和技术情报报告。
 - 🖥️ **WebUI 演示界面**：支持粘贴文本、上传 TXT/音频离线转录、在侧边栏校验与一键拉取 Ollama 模型，以及在线编辑与重构合规条款数据库。
 - 🔄 **端到端持续轮询**：监听目录自动触发。放入音频文件 -> 自动转录至 `inbox/` -> 自动触发合规分析，无需人工干预。
 - 🛡️ **文件安全分流**：成功 -> `archive/`，失败 -> `failed/`，原始文件绝不丢失。
@@ -228,6 +234,14 @@ uv run python transcribe.py
 # 终端 2：启动合规审计守护程序 (监听 inbox/ 并输出至 output/)
 uv run python app.py
 ```
+
+半导体专利/IP技术情报模式可用独立规则库运行：
+
+```bash
+uv run python app.py --mode semiconductor_ip
+```
+
+本模式会生成 `*_claim_chart.csv`、`*_ip_risk_items.csv` 和 `*_ip_analysis_report.md`。它只用于技术情报整理、专利文本理解和 IP 初筛，不构成法律意见、侵权结论或专利有效性判断，所有结果均需人工复核。
 
 ### 详细步骤：
 1. **音频输入**：将会议录音（例如 `weekly_meeting.m4a`）放入 `recordings/`。

@@ -1,8 +1,10 @@
 import os
 import json
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 import unittest.mock as mock
@@ -77,6 +79,92 @@ class AppTests(unittest.TestCase):
     def test_transcribe_resolve_executable_supports_path_command_names(self):
         self.assertEqual(transcribe.resolve_executable("python"), shutil.which("python") or "python")
         self.assertEqual(transcribe.resolve_executable("~/bin/custom-tool"), os.path.expanduser("~/bin/custom-tool"))
+
+    def test_audit_mode_helpers_default_and_validate_modes(self):
+        self.assertEqual(app.normalize_audit_mode(None), "compliance")
+        self.assertEqual(app.normalize_audit_mode(" semiconductor_ip "), "semiconductor_ip")
+        self.assertEqual(app.rules_dir_for_mode("semiconductor_ip"), app.SEMICONDUCTOR_IP_CONFIG_DIR)
+        self.assertEqual(app.collection_name_for_mode("semiconductor_ip"), "semiconductor_ip_rules")
+
+        with self.assertRaises(ValueError):
+            app.normalize_audit_mode("unknown")
+
+    def test_validate_semiconductor_ip_result_defaults_and_review_flags(self):
+        result = app.validate_semiconductor_ip_result(
+            {
+                "technical_topic": "  SiC MOSFET  ",
+                "claim_chart": [
+                    {
+                        "technical_feature": "沟槽栅",
+                        "confidence": "bad",
+                        "evidence_quote": "",
+                        "needs_human_review": "no",
+                    }
+                ],
+                "risk_items": [
+                    {
+                        "risk_type": "证据不足",
+                        "severity": "bad",
+                        "evidence_quote": "",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["technical_topic"], "SiC MOSFET")
+        self.assertEqual(result["material_type"], "")
+        self.assertEqual(result["claim_chart"][0]["confidence"], "Medium")
+        self.assertTrue(result["claim_chart"][0]["needs_human_review"])
+        self.assertEqual(result["risk_items"][0]["severity"], "Medium")
+        self.assertTrue(result["risk_items"][0]["needs_human_review"])
+        self.assertIn("不构成法律意见", result["disclaimer"])
+
+    def test_write_semiconductor_ip_outputs_generates_csv_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            with mock.patch("app.OUTPUT", test_output):
+                result = app.write_semiconductor_ip_outputs(
+                    source_file="sic_demo.txt",
+                    content="一种碳化硅沟槽栅MOSFET器件，包括沟槽和栅介质层。",
+                    retrieved_docs=["FTO 初筛不得输出确定侵权结论。"],
+                    data=app.validate_semiconductor_ip_result(
+                        {
+                            "technical_topic": "SiC MOSFET",
+                            "material_type": "synthetic patent demo",
+                            "summary": "沟槽栅器件结构。",
+                            "claim_chart": [
+                                {
+                                    "claim_id": "1",
+                                    "element_id": "1a",
+                                    "technical_feature": "沟槽栅",
+                                    "structure_or_step": "沟槽和栅介质层",
+                                    "function_effect": "改善栅氧可靠性",
+                                    "evidence_quote": "包括沟槽和栅介质层",
+                                    "confidence": "High",
+                                }
+                            ],
+                            "risk_items": [
+                                {
+                                    "risk_type": "FTO关注点",
+                                    "severity": "Medium",
+                                    "related_claim_or_paragraph": "claim 1",
+                                    "evidence_quote": "包括沟槽和栅介质层",
+                                    "reason": "结构要素需要进一步检索。",
+                                    "suggested_follow_up": "检索沟槽栅SiC MOSFET专利族。",
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+                self.assertTrue(result.success)
+                self.assertTrue(result.tasks_csv_path.endswith("_claim_chart.csv"))
+                self.assertTrue(result.risk_csv_path.endswith("_ip_risk_items.csv"))
+                self.assertTrue(result.report_path.endswith("_ip_analysis_report.md"))
+                report_text = Path(result.report_path).read_text(encoding="utf-8")
+                self.assertIn("半导体专利与技术情报分析报告", report_text)
+                self.assertIn("不构成法律意见", report_text)
 
     def test_build_risk_items_masks_sensitive_evidence(self):
         text = (
@@ -383,6 +471,73 @@ class AppTests(unittest.TestCase):
             self.assertTrue(os.path.exists(result.tasks_csv_path))
             self.assertTrue(os.path.exists(result.risk_csv_path))
             self.assertTrue(os.path.exists(result.report_path))
+
+    @mock.patch("app.ollama.generate")
+    @mock.patch("app.ollama.embeddings")
+    def test_process_file_with_result_supports_semiconductor_ip_mode(self, mock_embeddings, mock_generate):
+        mock_embeddings.return_value = {"embedding": [0.1] * 768}
+        mock_generate.return_value = [
+            {
+                "response": json.dumps(
+                    {
+                        "technical_topic": "SiC MOSFET",
+                        "material_type": "synthetic patent demo",
+                        "summary": "沟槽栅SiC器件。",
+                        "claim_chart": [
+                            {
+                                "claim_id": "1",
+                                "element_id": "1a",
+                                "technical_feature": "沟槽栅结构",
+                                "structure_or_step": "沟槽内设置栅介质层和栅电极",
+                                "function_effect": "改善栅氧可靠性",
+                                "evidence_quote": "沟槽内设置栅介质层和栅电极",
+                                "confidence": "High",
+                            }
+                        ],
+                        "risk_items": [
+                            {
+                                "risk_type": "FTO关注点",
+                                "severity": "Medium",
+                                "related_claim_or_paragraph": "claim 1",
+                                "evidence_quote": "沟槽内设置栅介质层和栅电极",
+                                "reason": "需要进一步检索相似沟槽栅结构。",
+                                "suggested_follow_up": "检索SiC trench MOSFET专利族。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        ]
+        mock_collection = mock.Mock()
+        mock_collection.query.return_value = {
+            "documents": [["不得输出确定侵权结论。"]],
+            "distances": [[0.2]],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_output = os.path.join(tmp_dir, "output")
+            os.makedirs(test_output)
+            test_file = os.path.join(tmp_dir, "sic_demo.txt")
+            Path(test_file).write_text("沟槽内设置栅介质层和栅电极。", encoding="utf-8")
+
+            with mock.patch("app.OUTPUT", test_output):
+                result = app.process_file_with_result(
+                    test_file,
+                    mock_collection,
+                    mode="semiconductor_ip",
+                )
+                entries = [
+                    json.loads(line)
+                    for line in (Path(test_output) / "audit_history.jsonl").read_text(encoding="utf-8").splitlines()
+                ]
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.mode, "semiconductor_ip")
+        self.assertTrue(result.tasks_csv_path.endswith("_claim_chart.csv"))
+        self.assertTrue(result.risk_csv_path.endswith("_ip_risk_items.csv"))
+        self.assertTrue(result.report_path.endswith("_ip_analysis_report.md"))
+        self.assertEqual(entries[0]["mode"], "semiconductor_ip")
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
@@ -692,6 +847,24 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result, "collection")
         rebuild_mock.assert_called_once_with()
         clear_mock.assert_called_once_with()
+
+    def test_webui_run_audit_worker_passes_mode_to_app(self):
+        result_queue = queue.Queue()
+        cancel_event = threading.Event()
+        fake_result = app.ProcessResult(success=True, mode="semiconductor_ip")
+
+        with mock.patch("app.process_file_with_result", return_value=fake_result) as process_mock:
+            webui.run_audit_worker(
+                "input.txt",
+                "collection",
+                cancel_event,
+                result_queue,
+                mode="semiconductor_ip",
+            )
+
+        process_mock.assert_called_once()
+        self.assertEqual(process_mock.call_args.kwargs["mode"], "semiconductor_ip")
+        self.assertEqual(result_queue.get_nowait(), ("result", fake_result))
 
     def test_webui_running_audit_poll_tick_does_not_block_until_completion(self):
         poll_mock = mock.Mock()
