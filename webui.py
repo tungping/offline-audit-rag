@@ -300,7 +300,6 @@ def main() -> None:
     poll_audit_result()
 
     st.title("Offline Auto Audit")
-    st.caption("本地会议合规、数据治理与任务指派审计")
 
     with st.sidebar:
         st.subheader("本地模型")
@@ -350,6 +349,12 @@ def main() -> None:
             if value == app.COMPLIANCE_MODE
             else "半导体专利/IP技术情报",
         )
+
+    st.caption(
+        "本地会议合规、数据治理与任务指派审计"
+        if selected_mode == app.COMPLIANCE_MODE
+        else "本地半导体专利/IP技术情报初筛"
+    )
 
     input_tab, upload_tab, audio_tab, history_tab, config_tab = st.tabs(
         ["粘贴文本", "上传 TXT", "上传音频", "历史统计", "合规条款管理"]
