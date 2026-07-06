@@ -105,10 +105,12 @@ def summarize_history(output_dir: str | Path) -> dict[str, Any]:
     entries = _read_history_entries(output_dir)
     risk_type_counts: Counter[str] = Counter()
     severity_counts: Counter[str] = Counter()
+    mode_counts: Counter[str] = Counter()
 
     for entry in entries:
         risk_type_counts.update(entry.get("risk_type_counts", {}))
         severity_counts.update(entry.get("severity_counts", {}))
+        mode_counts.update([str(entry.get("mode") or "compliance")])
 
     return {
         "audit_count": len(entries),
@@ -116,6 +118,7 @@ def summarize_history(output_dir: str | Path) -> dict[str, Any]:
         "risk_count": int(sum(entry.get("risk_count", 0) for entry in entries)),
         "high_risk_count": int(sum(entry.get("high_risk_count", 0) for entry in entries)),
         "manual_review_count": int(sum(entry.get("manual_review_count", 0) for entry in entries)),
+        "mode_counts": dict(mode_counts),
         "risk_type_counts": dict(risk_type_counts),
         "severity_counts": dict(severity_counts),
         "recent_entries": entries[-10:][::-1],
@@ -135,6 +138,8 @@ def render_history_markdown(summary: dict[str, Any]) -> str:
         f"| Risks detected | {summary['risk_count']} |",
         f"| High risks | {summary['high_risk_count']} |",
         f"| Manual review items | {summary['manual_review_count']} |",
+        "",
+        _markdown_count_table("Mode Breakdown", summary.get("mode_counts", {})),
         "",
         _markdown_count_table("Risk Type Breakdown", summary["risk_type_counts"]),
         "",

@@ -55,6 +55,8 @@ AUDIT_MODEL = os.getenv("AUDIT_MODEL", "qwen3.5:9b")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
 AUDIT_INPUT_TOKEN_LIMIT = int(os.getenv("AUDIT_INPUT_TOKEN_LIMIT", "6000"))
+SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT = int(os.getenv("SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT", "2500"))
+SEMICONDUCTOR_IP_NUM_PREDICT = int(os.getenv("SEMICONDUCTOR_IP_NUM_PREDICT", "900"))
 
 # 事件循环与队列
 file_queue = queue.Queue()
@@ -141,6 +143,23 @@ def collection_name_for_mode(mode: str) -> str:
     if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
         return "semiconductor_ip_rules"
     return "compliance_rules"
+
+
+def input_token_limit_for_mode(mode: str) -> int:
+    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
+        return SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT
+    return AUDIT_INPUT_TOKEN_LIMIT
+
+
+def generation_options_for_mode(mode: str) -> dict[str, int | float]:
+    options: dict[str, int | float] = {
+        "temperature": 0.1,
+        "num_ctx": 8192,
+        "num_keep": 0,
+    }
+    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
+        options["num_predict"] = SEMICONDUCTOR_IP_NUM_PREDICT
+    return options
 
 
 def count_tokens(text):
@@ -717,6 +736,7 @@ def build_semiconductor_ip_system_prompt(retrieved_docs: list[str]) -> str:
 4. 每个关键判断尽量给出原文证据片段。
 5. 如果证据不足，必须标记 needs_human_review = true。
 6. 输出必须是可解析 JSON，不要输出 Markdown。
+7. 为了本地模型快速完成，claim_chart 最多 6 条，risk_items 最多 5 条，technology_routes 最多 3 条，follow_up_questions 最多 5 条。
 
 请输出一个 JSON object，字段如下：
 {{
@@ -1021,12 +1041,15 @@ def process_file_with_result(
 
         # 3. 本地大模型推理并流式监听
         logging.info(f"大模型分析中 (模型: {AUDIT_MODEL})，如需强制退出请按 Ctrl+C")
-        audit_prompt_content = bound_audit_prompt_content(content)
+        audit_prompt_content = bound_audit_prompt_content(
+            content,
+            max_tokens=input_token_limit_for_mode(mode),
+        )
         response_stream = ollama.generate(
             model=AUDIT_MODEL,
             prompt=audit_prompt_content,
             system=system_prompt,
-            options={"temperature": 0.1, "num_ctx": 8192, "num_keep": 0},
+            options=generation_options_for_mode(mode),
             stream=True,
         )
 

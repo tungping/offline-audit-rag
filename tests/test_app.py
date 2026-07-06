@@ -89,6 +89,17 @@ class AppTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.normalize_audit_mode("unknown")
 
+    def test_generation_options_limit_semiconductor_output_only(self):
+        compliance_options = app.generation_options_for_mode("compliance")
+        semiconductor_options = app.generation_options_for_mode("semiconductor_ip")
+
+        self.assertNotIn("num_predict", compliance_options)
+        self.assertEqual(semiconductor_options["num_predict"], app.SEMICONDUCTOR_IP_NUM_PREDICT)
+        self.assertLess(
+            app.input_token_limit_for_mode("semiconductor_ip"),
+            app.input_token_limit_for_mode("compliance"),
+        )
+
     def test_validate_semiconductor_ip_result_defaults_and_review_flags(self):
         result = app.validate_semiconductor_ip_result(
             {
@@ -538,6 +549,10 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.risk_csv_path.endswith("_ip_risk_items.csv"))
         self.assertTrue(result.report_path.endswith("_ip_analysis_report.md"))
         self.assertEqual(entries[0]["mode"], "semiconductor_ip")
+        self.assertEqual(
+            mock_generate.call_args.kwargs["options"]["num_predict"],
+            app.SEMICONDUCTOR_IP_NUM_PREDICT,
+        )
 
     @mock.patch('app.ollama.embeddings')
     @mock.patch('app.ollama.generate')
@@ -794,6 +809,7 @@ class AppTests(unittest.TestCase):
                 {
                     "audit_time": "2026-06-25 11:00:00",
                     "source_file": "b.txt",
+                    "mode": "semiconductor_ip",
                     "task_count": 0,
                     "risk_count": 1,
                     "high_risk_count": 0,
@@ -814,8 +830,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual(summary["risk_count"], 3)
         self.assertEqual(summary["high_risk_count"], 1)
         self.assertEqual(summary["manual_review_count"], 1)
+        self.assertEqual(summary["mode_counts"]["compliance"], 1)
+        self.assertEqual(summary["mode_counts"]["semiconductor_ip"], 1)
         self.assertEqual(summary["risk_type_counts"]["敏感信息"], 2)
         self.assertIn("| a.txt | 2026-06-25 10:00:00 | 1 | 2 | 1 | 1 |", markdown)
+        self.assertIn("| semiconductor_ip | 1 |", markdown)
         self.assertIn("| 敏感信息 | 2 |", markdown)
 
     def test_render_summary_markdown_includes_portfolio_metrics(self):
@@ -866,6 +885,15 @@ class AppTests(unittest.TestCase):
         self.assertEqual(process_mock.call_args.kwargs["mode"], "semiconductor_ip")
         self.assertEqual(result_queue.get_nowait(), ("result", fake_result))
 
+    def test_webui_demo_text_and_label_follow_mode(self):
+        self.assertIn("客户张女士", webui.demo_text_for_mode(app.COMPLIANCE_MODE))
+        self.assertIn("SiC MOSFET", webui.demo_text_for_mode(app.SEMICONDUCTOR_IP_MODE))
+        self.assertEqual(webui.input_label_for_mode(app.COMPLIANCE_MODE), "会议记录 / SOP / 任务指派文本")
+        self.assertEqual(
+            webui.input_label_for_mode(app.SEMICONDUCTOR_IP_MODE),
+            "公开专利文本 / 技术交底 / 产品说明 / 论文摘要",
+        )
+
     def test_webui_running_audit_poll_tick_does_not_block_until_completion(self):
         poll_mock = mock.Mock()
         sleep_mock = mock.Mock()
@@ -878,6 +906,13 @@ class AppTests(unittest.TestCase):
 
         sleep_mock.assert_called_once_with(0.2)
         poll_mock.assert_called_once_with()
+
+    def test_webui_running_audit_status_uses_stable_info(self):
+        info_mock = mock.Mock()
+
+        webui.render_running_audit_status(info_func=info_mock)
+
+        info_mock.assert_called_once_with("正在审计中，可以点击“停止审计”中断本次任务。")
 
     def test_build_risk_items_extracts_and_masks_sensitive_entities(self):
         entities = [
