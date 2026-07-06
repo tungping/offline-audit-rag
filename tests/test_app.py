@@ -854,6 +854,50 @@ class AppTests(unittest.TestCase):
         self.assertIn("| Tasks extracted | 3 |", markdown)
         self.assertIn("| 敏感信息 | 2 |", markdown)
 
+    def test_summarize_semiconductor_ip_outputs_reads_claim_and_risk_csvs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            pd.DataFrame(
+                [
+                    {
+                        "technical_feature": "沟槽栅结构",
+                        "confidence": "High",
+                        "needs_human_review": False,
+                    },
+                    {
+                        "technical_feature": "屏蔽区",
+                        "confidence": "Medium",
+                        "needs_human_review": "True",
+                    },
+                ]
+            ).to_csv(output_dir / "sic_2026-07-06_claim_chart.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "risk_type": "FTO关注点",
+                        "severity": "Medium",
+                        "needs_human_review": True,
+                    },
+                    {
+                        "risk_type": "证据不足",
+                        "severity": "Low",
+                        "needs_human_review": False,
+                    },
+                ]
+            ).to_csv(output_dir / "sic_2026-07-06_ip_risk_items.csv", index=False)
+
+            summary = summarize_audits.summarize_semiconductor_ip_outputs(output_dir)
+            markdown = summarize_audits.render_semiconductor_ip_summary_markdown(summary)
+
+        self.assertEqual(summary["analysis_file_count"], 1)
+        self.assertEqual(summary["claim_count"], 2)
+        self.assertEqual(summary["risk_count"], 2)
+        self.assertEqual(summary["manual_review_count"], 2)
+        self.assertEqual(summary["severity_counts"]["Medium"], 1)
+        self.assertEqual(summary["risk_type_counts"]["FTO关注点"], 1)
+        self.assertIn("| Claim chart items | 2 |", markdown)
+        self.assertIn("| 沟槽栅结构 | 1 |", markdown)
+
     def test_webui_sync_knowledge_base_cache_clears_cached_collection(self):
         clear_mock = mock.Mock()
         rebuild_mock = mock.Mock(return_value="collection")

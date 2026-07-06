@@ -22,6 +22,7 @@
 | 半导体 Claim Chart | [`examples/semiconductor/sample_ip_claim_chart.csv`](examples/semiconductor/sample_ip_claim_chart.csv) |
 | 半导体 IP 风险项 | [`examples/semiconductor/sample_ip_risk_items.csv`](examples/semiconductor/sample_ip_risk_items.csv) |
 | 半导体 IP 分析报告 | [`examples/semiconductor/sample_ip_analysis_report.md`](examples/semiconductor/sample_ip_analysis_report.md) |
+| 半导体 IP 作品说明 | [`docs/portfolio_semiconductor_ip.md`](docs/portfolio_semiconductor_ip.md) |
 
 适合在简历或面试中强调的能力点：
 
@@ -341,6 +342,12 @@ uv run python summarize_audits.py --output-dir output --write output/portfolio_s
 
 汇总报告包括审计文件数、任务数、风险数、高/中风险分布、风险类型分布和人工复核数量。
 
+半导体 IP 输出可单独汇总 claim chart、IP 风险项、人工复核项、严重级别、风险类型和技术特征分布：
+
+```bash
+uv run python summarize_audits.py --mode semiconductor_ip --output-dir output --write output/ip_portfolio_summary.md
+```
+
 ---
 
 ## 🧪 测试
@@ -361,6 +368,7 @@ uv run python -m unittest tests.test_app -v
 
 - 数据治理规则识别：敏感信息、模糊表述、SOP 缺口、跨部门协作风险
 - 审计输出生成：任务 CSV、风险项 CSV、Markdown 报告
+- 半导体 IP 输出：claim chart、IP 风险项、Markdown 报告和 portfolio 汇总
 - 脱敏逻辑：报告、CSV、日志和输出文件名不泄露完整敏感字段
 - WebUI 停止审计底层取消通道
 

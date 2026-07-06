@@ -9,6 +9,8 @@ import pandas as pd
 
 
 HISTORY_FILENAME = "audit_history.jsonl"
+COMPLIANCE_MODE = "compliance"
+SEMICONDUCTOR_IP_MODE = "semiconductor_ip"
 
 
 def _truthy(value: Any) -> bool:
@@ -83,6 +85,65 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
         _markdown_count_table("Severity Breakdown", summary["severity_counts"]),
         "",
         _markdown_count_table("Risk Type Breakdown", summary["risk_type_counts"]),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def summarize_semiconductor_ip_outputs(output_dir: str | Path) -> dict[str, Any]:
+    output_path = Path(output_dir)
+    claim_files = sorted(output_path.glob("*_claim_chart.csv"))
+    risk_files = sorted(output_path.glob("*_ip_risk_items.csv"))
+
+    claims_df = _read_csv_files(claim_files)
+    risks_df = _read_csv_files(risk_files)
+
+    severity_counts: Counter[str] = Counter()
+    if "severity" in risks_df.columns:
+        severity_counts.update(str(value) for value in risks_df["severity"].dropna())
+
+    risk_type_counts: Counter[str] = Counter()
+    if "risk_type" in risks_df.columns:
+        risk_type_counts.update(str(value) for value in risks_df["risk_type"].dropna())
+
+    technical_feature_counts: Counter[str] = Counter()
+    if "technical_feature" in claims_df.columns:
+        technical_feature_counts.update(str(value) for value in claims_df["technical_feature"].dropna())
+
+    manual_review_count = 0
+    for frame in (claims_df, risks_df):
+        if "needs_human_review" in frame.columns:
+            manual_review_count += int(sum(_truthy(value) for value in frame["needs_human_review"]))
+
+    return {
+        "analysis_file_count": max(len(claim_files), len(risk_files)),
+        "claim_count": int(len(claims_df)),
+        "risk_count": int(len(risks_df)),
+        "manual_review_count": manual_review_count,
+        "severity_counts": dict(severity_counts),
+        "risk_type_counts": dict(risk_type_counts),
+        "technical_feature_counts": dict(technical_feature_counts),
+    }
+
+
+def render_semiconductor_ip_summary_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Semiconductor IP Portfolio Summary",
+        "",
+        "## Overview",
+        "",
+        "| Metric | Value |",
+        "| :--- | ---: |",
+        f"| Analysis files | {summary['analysis_file_count']} |",
+        f"| Claim chart items | {summary['claim_count']} |",
+        f"| IP risk items | {summary['risk_count']} |",
+        f"| Manual review items | {summary['manual_review_count']} |",
+        "",
+        _markdown_count_table("Severity Breakdown", summary["severity_counts"]),
+        "",
+        _markdown_count_table("Risk Type Breakdown", summary["risk_type_counts"]),
+        "",
+        _markdown_count_table("Technical Feature Breakdown", summary["technical_feature_counts"]),
         "",
     ]
     return "\n".join(lines)
@@ -166,12 +227,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize Offline Auto Audit CSV outputs.")
     parser.add_argument("--output-dir", default="output", help="Directory containing audit CSV outputs.")
     parser.add_argument("--write", help="Optional markdown path to write the summary report.")
+    parser.add_argument(
+        "--mode",
+        choices=[COMPLIANCE_MODE, SEMICONDUCTOR_IP_MODE],
+        default=COMPLIANCE_MODE,
+        help="Output mode to summarize. Defaults to compliance.",
+    )
     parser.add_argument("--history", action="store_true", help="Summarize audit_history.jsonl instead of scanning CSV files.")
     args = parser.parse_args()
 
     if args.history:
         summary = summarize_history(args.output_dir)
         markdown = render_history_markdown(summary)
+    elif args.mode == SEMICONDUCTOR_IP_MODE:
+        summary = summarize_semiconductor_ip_outputs(args.output_dir)
+        markdown = render_semiconductor_ip_summary_markdown(summary)
     else:
         summary = summarize_output_dir(args.output_dir)
         markdown = render_summary_markdown(summary)
