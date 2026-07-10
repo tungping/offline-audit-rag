@@ -216,6 +216,28 @@ class AgentRuntime:
         self._transition(session, SessionStatus.RUNNING)
         return session
 
+    def skip_clarification(self, session_id: str) -> AgentSession:
+        session = self.store.load(session_id)
+        if session.status is not SessionStatus.WAITING_FOR_CLARIFICATION:
+            raise RuntimeStateError("session is not waiting for clarification")
+        session.observations.append(
+            {
+                "kind": "clarification",
+                "question": session.pending_question,
+                "response": "",
+                "skipped": True,
+            }
+        )
+        session.pending_question = ""
+        self.store.save(session)
+        self._append_event(
+            session,
+            "clarification_skipped",
+            {"summary": "用户选择跳过澄清"},
+        )
+        self._transition(session, SessionStatus.RUNNING)
+        return session
+
     def cancel(self, session_id: str) -> AgentSession:
         session = self.store.load(session_id)
         if session.status in TERMINAL_STATUSES:
@@ -284,6 +306,8 @@ class AgentRuntime:
             item for item in result.evidence if item.evidence_id not in known_ids
         )
         self.store.save_evidence(session.session_id, evidence)
+        session.model_calls += result.model_calls
+        session.query_rounds += result.query_rounds
         session.observations.append(
             {
                 "tool_name": action.tool_name,
@@ -302,6 +326,10 @@ class AgentRuntime:
                 "evidence_ids": [item.evidence_id for item in result.evidence],
             },
         )
+        if session.model_calls > session.budget.max_model_calls:
+            return self._incomplete(session, "model call budget exhausted")
+        if session.query_rounds > session.budget.max_query_rounds:
+            return self._incomplete(session, "query adjustment budget exhausted")
         return None
 
     def _advance_stage(

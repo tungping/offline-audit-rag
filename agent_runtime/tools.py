@@ -35,6 +35,8 @@ class ToolResult:
     data: dict[str, Any]
     evidence: tuple[Evidence, ...] = ()
     retryable: bool = False
+    model_calls: int = 0
+    query_rounds: int = 0
 
 
 @dataclass(frozen=True)
