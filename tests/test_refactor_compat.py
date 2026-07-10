@@ -1,5 +1,5 @@
 import app
-from audit_core import config, file_ops, formatting, models, text_processing
+from audit_core import artifacts, config, file_ops, formatting, history, models, pipeline, text_processing
 from audit_core import knowledge_base, model_io
 from capabilities.patent_research import legacy_analysis
 from unittest import mock
@@ -58,3 +58,14 @@ def test_app_reexports_legacy_semiconductor_analysis():
         app.write_semiconductor_ip_outputs
         is legacy_analysis.write_semiconductor_ip_outputs
     )
+
+
+def test_app_reexports_classic_pipeline():
+    assert app.process_file_with_result is pipeline.process_file_with_result
+    assert app.process_file is pipeline.process_file
+    assert app.record_audit_history is history.record_audit_history
+
+
+def test_classic_cli_modes_remain_supported():
+    assert app.parse_args([]).mode == "compliance"
+    assert app.parse_args(["--mode", "semiconductor_ip"]).mode == "semiconductor_ip"

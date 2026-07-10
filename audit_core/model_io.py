@@ -26,10 +26,11 @@ def generate_json_stream(
     prompt: str,
     options: dict[str, int | float],
     cancel_checker: Callable[[], bool] | None = None,
-    generate: Callable[..., Iterable[dict[str, Any]]] = ollama.generate,
+    generate: Callable[..., Iterable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     chunks: list[str] = []
-    stream = generate(
+    generator = generate or ollama.generate
+    stream = generator(
         model=model,
         system=system,
         prompt=prompt,
