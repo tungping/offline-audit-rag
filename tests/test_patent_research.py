@@ -3,13 +3,24 @@ from pathlib import Path
 
 import pytest
 
+from agent_runtime.evidence import source_sha256
+from agent_runtime.models import SessionStatus
+from agent_runtime.runtime import AgentRuntime
+from agent_runtime.session_store import SessionStore
+from agent_runtime.tools import ToolRegistry
 from capabilities.patent_research.corpus import corpus_version, load_corpus
+from capabilities.patent_research.playbook import (
+    PatentPlaybookPlanner,
+    build_patent_capability,
+)
 from capabilities.patent_research.search import (
+    PatentHit,
     build_semantic_index,
     keyword_search,
     merge_ranked_hits,
     semantic_search,
 )
+from capabilities.patent_research.tools import register_patent_tools
 
 
 CORPUS = Path("capabilities/patent_research/corpus/synthetic_sic_patents.jsonl")
@@ -106,3 +117,109 @@ def test_semantic_index_metadata_and_search_are_injectable(corpus):
     assert [hit.document_id for hit in hits] == ["SYN-SIC-009", "SYN-SIC-001"]
     assert hits[0].semantic_locator == "claim:C1"
     assert hits[0].retrievers == frozenset({"semantic"})
+
+
+BRIEF = Path("examples/agent_demo/sic_trench_product_brief.txt").read_text(
+    encoding="utf-8"
+)
+
+
+def feature_result():
+    return {
+        "technical_features": [{
+            "feature_id": "F1",
+            "feature": "沟槽底部接地屏蔽区",
+            "synonyms": ["底部屏蔽电极", "source-connected shield"],
+            "evidence_quote": "沟槽底部设置与源极相连、保持接地电位的屏蔽区，用于降低栅介质承受的电场并改善长期可靠性",
+        }],
+        "keyword_queries": [["沟槽", "底部屏蔽区"], ["栅介质电场", "可靠性"]],
+        "semantic_queries": ["降低 SiC 沟槽 MOSFET 栅氧电场的屏蔽结构"],
+    }
+
+
+def make_patent_runtime(tmp_path: Path, *, empty=False):
+    corpus = load_corpus(CORPUS)
+    registry = ToolRegistry()
+    register_patent_tools(registry)
+    services = {
+        "source_text": BRIEF,
+        "source_id": "sic_trench_product_brief.txt",
+        "patent_state": {},
+        "patent_corpus": corpus,
+        "patent_feature_model": lambda system, prompt: feature_result(),
+        "patent_keyword_search": (
+            (lambda patents, terms, limit: []) if empty else keyword_search
+        ),
+        "patent_semantic_search": (
+            (lambda queries, limit: [])
+            if empty
+            else lambda queries, limit: [
+                PatentHit("SYN-SIC-009", 0.9, frozenset({"semantic"}), semantic_rank=1, semantic_locator="claim:C1"),
+                PatentHit("SYN-SIC-001", 0.8, frozenset({"semantic"}), semantic_rank=2, semantic_locator="claim:C1"),
+            ]
+        ),
+    }
+    store = SessionStore(tmp_path / "sessions")
+    runtime = AgentRuntime(
+        store=store,
+        registry=registry,
+        planner=PatentPlaybookPlanner(),
+        capability=build_patent_capability(),
+        services=services,
+    )
+    session = runtime.create_session(
+        goal="在合成语料中检索并比较沟槽底部屏蔽结构",
+        source_name="sic_trench_product_brief.txt",
+        source_sha256=source_sha256(BRIEF),
+        model_name="demo",
+        knowledge_version=corpus_version(CORPUS),
+    )
+    runtime.approve(session.session_id)
+    return runtime, store, session.session_id
+
+
+def test_patent_golden_path_produces_verified_synthetic_artifacts(tmp_path: Path):
+    runtime, store, session_id = make_patent_runtime(tmp_path)
+    session = runtime.run_until_pause(session_id)
+
+    assert session.status is SessionStatus.COMPLETED
+    assert session.model_calls <= 5
+    assert session.tool_calls <= 14
+    assert session.query_rounds <= 2
+    artifact_dir = store.artifact_dir(session_id)
+    report_path = artifact_dir / "patent_research_report.md"
+    retrieval_path = artifact_dir / "patent_retrieval_results.csv"
+    chart_path = artifact_dir / "claim_chart.csv"
+    assert report_path.exists() and retrieval_path.exists() and chart_path.exists()
+    retrieval = retrieval_path.read_text(encoding="utf-8-sig")
+    assert "SYN-SIC-001" in retrieval and "SYN-SIC-009" in retrieval
+    chart = chart_path.read_text(encoding="utf-8-sig")
+    assert "document_id" in chart and "claim_id" in chart and "evidence_ids" in chart
+    report = report_path.read_text(encoding="utf-8")
+    assert "合成语料" in report and "不构成法律意见" in report
+
+    patents = {patent.document_id: patent for patent in load_corpus(CORPUS)}
+    source_texts = {BRIEF}
+    for patent in patents.values():
+        source_texts.add(patent.abstract)
+        source_texts.update(claim.text for claim in patent.claims)
+    evidence = json.loads(
+        (artifact_dir.parent / "evidence.json").read_text(encoding="utf-8")
+    )
+    assert evidence
+    assert all(any(item["quote"] in text for text in source_texts) for item in evidence)
+
+
+def test_patent_no_result_stops_incomplete_without_fabrication(tmp_path: Path):
+    runtime, store, session_id = make_patent_runtime(tmp_path, empty=True)
+    session = runtime.run_until_pause(session_id)
+
+    assert session.status is SessionStatus.INCOMPLETE
+    assert session.query_rounds == 2
+    assert session.tool_calls <= 14
+    assert not (store.artifact_dir(session_id) / "patent_research_report.md").exists()
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (store.artifact_dir(session_id).parent).glob("*.json*")
+    )
+    assert "SYN-SIC-999" not in persisted

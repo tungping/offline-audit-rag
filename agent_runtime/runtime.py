@@ -330,6 +330,12 @@ class AgentRuntime:
             return self._incomplete(session, "model call budget exhausted")
         if session.query_rounds > session.budget.max_query_rounds:
             return self._incomplete(session, "query adjustment budget exhausted")
+        if (
+            result.query_rounds
+            and session.query_rounds >= session.budget.max_query_rounds
+            and result.data.get("no_results") is True
+        ):
+            return self._incomplete(session, "no results after query budget")
         return None
 
     def _advance_stage(
