@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import datetime
 import json
 import logging
@@ -10,9 +9,8 @@ import shutil
 import sys
 import threading
 import time
-from typing import Any, cast
+from typing import Any
 
-import chromadb
 import ollama
 import pandas as pd
 from watchdog.events import FileSystemEventHandler
@@ -60,6 +58,12 @@ from audit_core.formatting import (
     mask_output_basename,
 )
 from audit_core.models import ProcessResult
+from audit_core.knowledge_base import (
+    initialize_knowledge_base,
+    rebuild_knowledge_base,
+    retrieve_relevant_context,
+)
+from audit_core.model_io import check_environment, check_ollama_status
 from audit_core.text_processing import (
     bound_audit_prompt_content,
     count_tokens,
@@ -127,175 +131,6 @@ You MUST reply strictly in the following JSON format. Do not include any markdow
     }}
   ]
 }}"""
-
-
-async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
-    """
-    使用有限并发批量获取文档向量。
-    """
-    client = ollama.AsyncClient()
-    semaphore = asyncio.Semaphore(max(1, EMBEDDING_CONCURRENCY))
-
-    async def embed_one(doc: str) -> list[float]:
-        async with semaphore:
-            for attempt in range(EMBEDDING_MAX_RETRIES):
-                try:
-                    res = await client.embeddings(model=EMBED_MODEL, prompt=doc)
-                    return cast(list[float], res["embedding"])
-                except Exception:
-                    if attempt == EMBEDDING_MAX_RETRIES - 1:
-                        raise
-                    await asyncio.sleep(1 + attempt)
-            raise RuntimeError("Unreachable")
-
-    results = await asyncio.gather(*(embed_one(doc) for doc in documents))
-    return results
-
-
-def initialize_knowledge_base(mode: str = COMPLIANCE_MODE):
-    """
-    检查并初始化 ChromaDB 本地向量库。如果库中无数据，读取对应模式规则切片后写入。
-    """
-    mode = normalize_audit_mode(mode)
-    rules_dir = rules_dir_for_mode(mode)
-    client = chromadb.PersistentClient(path=VECTOR_STORE_DIR)
-    collection = client.get_or_create_collection(name=collection_name_for_mode(mode))
-
-    if collection.count() > 0:
-        logging.info("本地向量数据库已检测到 %s 数据，跳过向量库构建。", mode)
-        return collection
-
-    logging.info("本地向量数据库为空，开始读取 %s 规则...", mode)
-
-    files = sorted([f for f in os.listdir(rules_dir) if f.endswith(".txt")])
-    if not files and mode == COMPLIANCE_MODE:
-        default_rule_path = os.path.join(
-            rules_dir, "standard_pmo_compliance_rules.txt"
-        )
-        default_rules = """标准研发及发布合规规范手册（PMO Compliance Standard）：
-
-1. 分支开发管理与代码评审规范：
-   - 严禁任何开发人员直接向 master 或 main 等受保护分支推送代码（Bypassing Git workflow）。
-   - 所有代码修改必须在专属特征分支（Feature Branch）上进行开发。
-   - 开发完成后，必须向受保护分支提交 Merge Request (MR) 或 Pull Request (PR)。
-   - 必须有至少一名团队内其他开发人员（Peer/TL）进行 Code Review 代码审查并批准后，方能合并代码。
-
-2. QA 测试与生产发布合规规范：
-   - 严禁绕过 QA 测试环节以及团队标准 CI/CD 流水线，进行强制手动生产部署。
-   - 所有部署到生产环境的代码包、镜像（Docker Image），必须经过测试环境（Staging/Test）QA 团队验证通过并签署发布报告。
-   - 部署必须由专门运维人员或者规范的发布流水线按发布窗口执行，并确保系统配置可被审计追溯。
-
-3. 需求变更管理（Scope Creep）规范：
-   - 严禁在未更新 PRD（产品需求文档）、需求规格说明书或者系统架构文档的情况下，私自上线新功能或更改核心业务逻辑。
-   - 任何临时需求或重大业务变更必须先由 PM/PMO 评审，并在 Wiki 或文档库中补充规范文档归档后，方能安排开发排期与任务分配。
-   - 紧急故障修复期间必须保持职责清晰分工，防止混乱操作。
-"""
-        with open(default_rule_path, "w", encoding="utf-8") as f_def:
-            f_def.write(default_rules)
-        files = [os.path.basename(default_rule_path)]
-        logging.info(f"已为您自动生成默认合规规范文本: {default_rule_path}")
-
-    if not files and mode == SEMICONDUCTOR_IP_MODE:
-        default_rule_path = os.path.join(rules_dir, "sic_power_device_terms.txt")
-        default_rules = """SiC功率半导体IP初筛规则：
-
-1. 只基于输入文本和检索规则做技术情报整理，不输出法律意见。
-2. 优先拆解权利要求或核心技术特征中的结构、材料、步骤、功能和技术效果。
-3. 每个关键判断尽量给出原文证据；证据不足时标记人工复核。
-4. 不得输出确定侵权、确定不侵权、专利有效或专利无效结论。
-5. SiC MOSFET 分析重点包括 trench gate、drift layer、gate oxide reliability、on-resistance、breakdown voltage、thermal resistance 和 edge termination。
-"""
-        with open(default_rule_path, "w", encoding="utf-8") as f_def:
-            f_def.write(default_rules)
-        files = [os.path.basename(default_rule_path)]
-        logging.info("已自动生成默认半导体IP规则文本: %s", default_rule_path)
-
-    documents = []
-    ids = []
-    chunk_counter = 0
-
-    for file in files:
-        file_path = os.path.join(rules_dir, file)
-        with open(file_path, "r", encoding="utf-8") as f_in:
-            text_content = f_in.read()
-
-        chunks = recursive_split_text(text_content, chunk_size=500, chunk_overlap=200)
-        for chunk in chunks:
-            if chunk.strip():
-                documents.append(chunk)
-                ids.append(f"chunk_{chunk_counter}")
-                chunk_counter += 1
-
-    if not documents:
-        logging.warning("未提取到任何有效切片文本。")
-        return collection
-
-    logging.info(
-        f"已生成 {len(documents)} 个 {mode} 切片，正在并发调用 {EMBED_MODEL} 写入本地 ChromaDB..."
-    )
-
-    embeddings: Any = asyncio.run(_fetch_embeddings_async(documents))
-
-    collection.add(ids=ids, documents=documents, embeddings=embeddings)
-    logging.info("向量数据库构建成功！数据已持久化。")
-    return collection
-
-
-def retrieve_relevant_context(collection, query_text, top_k=3):
-    """
-    语义检索网关：将查询日志转为向量并在本地 collection 中检索出最相关的 top_k 条合规基准，
-    利用 RELEVANCE_THRESHOLD 进行相关度度量过滤。
-    对于长输入，采用分段检索以避免整体向量化导致精度下降。
-    """
-    # 估算 Token。若输入较短直接检索，若较长进行分片检索
-    if count_tokens(query_text) <= 500:
-        texts_to_embed = [query_text]
-    else:
-        # 分片检索并去重聚合
-        texts_to_embed = recursive_split_text(query_text, chunk_size=400, chunk_overlap=100)
-        if len(texts_to_embed) > 10:
-            texts_to_embed = texts_to_embed[:10]
-
-    all_retrieved = []
-    seen_docs = set()
-
-    for text in texts_to_embed:
-        if not text.strip():
-            continue
-        try:
-            res = ollama.embeddings(model=EMBED_MODEL, prompt=text)
-            query_embedding = res["embedding"]
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                include=["documents", "distances"],
-            )
-
-            if results and "documents" in results and results["documents"]:
-                docs = results["documents"][0]
-                distances = results.get("distances", [[]])[0]
-                for doc, dist in zip(docs, distances):
-                    if dist < RELEVANCE_THRESHOLD:
-                        if doc not in seen_docs:
-                            seen_docs.add(doc)
-                            all_retrieved.append((doc, dist))
-                    else:
-                        logging.debug(
-                            f"过滤低相关度基准 (distance={dist:.4f} >= threshold={RELEVANCE_THRESHOLD}): {doc[:30]}..."
-                        )
-        except Exception as e:
-            logging.error(f"提取分片 Embedding 检索失败: {e}")
-
-    # 按相似度（距离越小越好）排序，截取前 top_k 个
-    all_retrieved.sort(key=lambda x: x[1])
-    retrieved_docs = [doc for doc, dist in all_retrieved[:top_k]]
-
-    if not retrieved_docs:
-        logging.warning(
-            f"RAG 未检索到任何相关合规条款（threshold={RELEVANCE_THRESHOLD}），"
-            "审计将在无参考基准的情况下进行。可适当调高 RELEVANCE_THRESHOLD。"
-        )
-    return retrieved_docs
 
 
 SEMICONDUCTOR_IP_DISCLAIMER = (
@@ -966,70 +801,6 @@ def process_file_with_result(
 def process_file(file_path, collection, progress_prefix="", mode: str = COMPLIANCE_MODE):
     result = process_file_with_result(file_path, collection, progress_prefix, mode=mode)
     return result.success
-
-
-# 检查并自动构建文件夹环境
-def check_environment():
-    dirs = [
-        INBOX,
-        OUTPUT,
-        ARCHIVE,
-        FAILED,
-        CONFIG_DIR,
-        SEMICONDUCTOR_IP_CONFIG_DIR,
-        VECTOR_STORE_DIR,
-    ]
-    for d in dirs:
-        os.makedirs(d, exist_ok=True)
-
-
-def check_ollama_status() -> dict[str, Any]:
-    """
-    检查 Ollama 是否在线，以及所需的 AUDIT_MODEL 和 EMBED_MODEL 是否可用。
-    """
-    try:
-        client = ollama.Client()
-        models_info = client.list()
-        models = []
-        for m in models_info.get("models", []):
-            name = (
-                getattr(m, "model", None)
-                or (m.get("model") if isinstance(m, dict) else None)
-                or str(m)
-            )
-            models.append(name)
-        
-        audit_model_ok = AUDIT_MODEL in models or any(m.startswith(AUDIT_MODEL + ":") for m in models)
-        embed_model_ok = EMBED_MODEL in models or any(m.startswith(EMBED_MODEL + ":") for m in models)
-        
-        return {
-            "connected": True,
-            "audit_model_ok": audit_model_ok,
-            "embed_model_ok": embed_model_ok,
-            "models": models,
-            "error": ""
-        }
-    except Exception as e:
-        return {
-            "connected": False,
-            "audit_model_ok": False,
-            "embed_model_ok": False,
-            "models": [],
-            "error": str(e)
-        }
-
-
-def rebuild_knowledge_base(mode: str = COMPLIANCE_MODE):
-    """
-    强制删除现有 collection 并重新构建向量库。
-    """
-    mode = normalize_audit_mode(mode)
-    client = chromadb.PersistentClient(path=VECTOR_STORE_DIR)
-    try:
-        client.delete_collection(name=collection_name_for_mode(mode))
-    except Exception:
-        pass
-    return initialize_knowledge_base(mode)
 
 
 def wait_for_file_ready(file_path, timeout=5, stable_interval=0.5):
