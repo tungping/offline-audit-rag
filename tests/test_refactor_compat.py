@@ -1,6 +1,7 @@
 import app
 from audit_core import config, file_ops, formatting, models, text_processing
 from audit_core import knowledge_base, model_io
+from capabilities.patent_research import legacy_analysis
 from unittest import mock
 
 
@@ -42,3 +43,18 @@ def test_generate_json_stream_uses_injected_generator():
     )
     assert result == {"ok": True}
     generator.assert_called_once()
+
+
+def test_app_reexports_legacy_semiconductor_analysis():
+    assert (
+        app.validate_semiconductor_ip_result
+        is legacy_analysis.validate_semiconductor_ip_result
+    )
+    assert (
+        app.build_semiconductor_ip_system_prompt
+        is legacy_analysis.build_semiconductor_ip_system_prompt
+    )
+    assert (
+        app.write_semiconductor_ip_outputs
+        is legacy_analysis.write_semiconductor_ip_outputs
+    )

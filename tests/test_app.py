@@ -167,6 +167,7 @@ class AppTests(unittest.TestCase):
                             ],
                         }
                     ),
+                    output_dir=test_output,
                 )
 
                 self.assertTrue(result.success)
