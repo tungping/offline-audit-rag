@@ -10,59 +10,75 @@ import shutil
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from typing import Any, cast
 
 import chromadb
 import ollama
 import pandas as pd
-from dotenv import load_dotenv
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 import audit_rules
+from audit_core.config import (
+    ARCHIVE,
+    AUDIT_HISTORY_FILENAME,
+    AUDIT_INPUT_TOKEN_LIMIT,
+    AUDIT_MODEL,
+    BASE_DIR,
+    COMPLIANCE_MODE,
+    CONFIG_DIR,
+    EMBEDDING_CONCURRENCY,
+    EMBEDDING_MAX_RETRIES,
+    EMBED_MODEL,
+    FAILED,
+    INBOX,
+    OUTPUT,
+    POLL_INTERVAL,
+    RELEVANCE_THRESHOLD,
+    SEMICONDUCTOR_IP_CONFIG_DIR,
+    SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT,
+    SEMICONDUCTOR_IP_MODE,
+    SEMICONDUCTOR_IP_NUM_PREDICT,
+    SUPPORTED_AUDIT_MODES,
+    VECTOR_STORE_DIR,
+    collection_name_for_mode,
+    generation_options_for_mode,
+    input_token_limit_for_mode,
+    normalize_audit_mode,
+    rules_dir_for_mode,
+)
+from audit_core.file_ops import safe_move, unique_file_path
+from audit_core.formatting import (
+    _choice,
+    _clean_text,
+    _truthy,
+    extract_json_object,
+    markdown_quote_block,
+    markdown_table_cell,
+    mask_dataframe_text_columns,
+    mask_markdown_text,
+    mask_output_basename,
+)
+from audit_core.models import ProcessResult
+from audit_core.text_processing import (
+    bound_audit_prompt_content,
+    count_tokens,
+    recursive_split_text,
+)
 
 # ──────────────────────────────────────────────
 # 环境初始化与日志
 # ──────────────────────────────────────────────
-load_dotenv()
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INBOX = os.path.join(BASE_DIR, "inbox")
-OUTPUT = os.path.join(BASE_DIR, "output")
-ARCHIVE = os.path.join(BASE_DIR, "archive")
-FAILED = os.path.join(BASE_DIR, "failed")
-CONFIG_DIR = os.path.join(BASE_DIR, "config", "compliance_rules")
-SEMICONDUCTOR_IP_CONFIG_DIR = os.path.join(BASE_DIR, "config", "semiconductor_ip_rules")
-VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")
-AUDIT_HISTORY_FILENAME = "audit_history.jsonl"
-COMPLIANCE_MODE = "compliance"
-SEMICONDUCTOR_IP_MODE = "semiconductor_ip"
-SUPPORTED_AUDIT_MODES = {COMPLIANCE_MODE, SEMICONDUCTOR_IP_MODE}
-
-# 并发与重试
-EMBEDDING_CONCURRENCY = int(os.getenv("EMBEDDING_CONCURRENCY", "2"))
-EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
-
-# 模型配置
-AUDIT_MODEL = os.getenv("AUDIT_MODEL", "qwen3.5:9b")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
-RELEVANCE_THRESHOLD = float(os.getenv("RELEVANCE_THRESHOLD", "0.5"))
-AUDIT_INPUT_TOKEN_LIMIT = int(os.getenv("AUDIT_INPUT_TOKEN_LIMIT", "6000"))
-SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT = int(os.getenv("SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT", "2500"))
-SEMICONDUCTOR_IP_NUM_PREDICT = int(os.getenv("SEMICONDUCTOR_IP_NUM_PREDICT", "900"))
-
 # 事件循环与队列
 file_queue = queue.Queue()
 _queued_paths: set[str] = set()
 _queue_lock = threading.Lock()
-POLL_INTERVAL = 0.5  # 键盘检测间隔
 
 # 严密的 SYSTEM PROMPT 模板
 SYSTEM_PROMPT_TEMPLATE = """You are an expert PMO (Project Management Office) Compliance Auditor and Technical Operations Analyst. Your job is to analyze messy, unformatted technical meeting notes or logs, perform a strict compliance check against standard software engineering workflows using the provided compliance standards, and extract actionable tasks.
@@ -111,192 +127,6 @@ You MUST reply strictly in the following JSON format. Do not include any markdow
     }}
   ]
 }}"""
-
-
-@dataclass(frozen=True)
-class ProcessResult:
-    success: bool
-    tasks_csv_path: str = ""
-    risk_csv_path: str = ""
-    report_path: str = ""
-    cancelled: bool = False
-    mode: str = COMPLIANCE_MODE
-
-
-def normalize_audit_mode(mode: str | None) -> str:
-    selected = (mode or os.getenv("AUDIT_MODE") or COMPLIANCE_MODE).strip()
-    if selected not in SUPPORTED_AUDIT_MODES:
-        raise ValueError(
-            f"Unsupported audit mode: {selected}. "
-            f"Expected one of: {', '.join(sorted(SUPPORTED_AUDIT_MODES))}"
-        )
-    return selected
-
-
-def rules_dir_for_mode(mode: str) -> str:
-    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
-        return SEMICONDUCTOR_IP_CONFIG_DIR
-    return CONFIG_DIR
-
-
-def collection_name_for_mode(mode: str) -> str:
-    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
-        return "semiconductor_ip_rules"
-    return "compliance_rules"
-
-
-def input_token_limit_for_mode(mode: str) -> int:
-    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
-        return SEMICONDUCTOR_IP_INPUT_TOKEN_LIMIT
-    return AUDIT_INPUT_TOKEN_LIMIT
-
-
-def generation_options_for_mode(mode: str) -> dict[str, int | float]:
-    options: dict[str, int | float] = {
-        "temperature": 0.1,
-        "num_ctx": 8192,
-        "num_keep": 0,
-    }
-    if normalize_audit_mode(mode) == SEMICONDUCTOR_IP_MODE:
-        options["num_predict"] = SEMICONDUCTOR_IP_NUM_PREDICT
-    return options
-
-
-def count_tokens(text):
-    """
-    原生轻量级 Token 估算：
-    中文字符每个算 1 个 Token；英文单词按空格切分每个算 1 个 Token。
-    """
-    chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-    english_words = len(
-        [w for w in text.split() if w and not any("\u4e00" <= c <= "\u9fff" for c in w)]
-    )
-    return chinese_count + english_words
-
-
-def recursive_split_text(text, chunk_size=500, chunk_overlap=200):
-    """
-    模拟 RecursiveCharacterTextSplitter 原生实现。
-    根据层级（段落 -> 换行 -> 空格）递归切分文本，并保留指定的重叠区。
-    """
-    separators = ["\n\n", "\n", " ", ""]
-
-    def split(text_to_split, seps):
-        if not seps:
-            return [text_to_split]
-        sep = seps[0]
-        if sep == "":
-            return [
-                text_to_split[i : i + chunk_size]
-                for i in range(0, len(text_to_split), chunk_size)
-            ]
-
-        parts = text_to_split.split(sep)
-        chunks = []
-        current_chunk = []
-        current_size = 0
-
-        for part in parts:
-            part_size = count_tokens(part)
-            if part_size > chunk_size:
-                if current_chunk:
-                    chunks.append(sep.join(current_chunk))
-                    current_chunk = []
-                    current_size = 0
-                sub_parts = split(part, seps[1:])
-                chunks.extend(sub_parts)
-            elif (
-                current_size + part_size + (count_tokens(sep) if current_chunk else 0)
-                <= chunk_size
-            ):
-                current_chunk.append(part)
-                current_size += part_size + (
-                    count_tokens(sep) if len(current_chunk) > 1 else 0
-                )
-            else:
-                if current_chunk:
-                    chunks.append(sep.join(current_chunk))
-                current_chunk = [part]
-                current_size = part_size
-        if current_chunk:
-            chunks.append(sep.join(current_chunk))
-        return chunks
-
-    raw_chunks = split(text, separators)
-
-    merged_chunks = []
-    current_group = []
-    current_size = 0
-
-    for chunk in raw_chunks:
-        chunk_size_val = count_tokens(chunk)
-        if current_size + chunk_size_val <= chunk_size:
-            current_group.append(chunk)
-            current_size += chunk_size_val
-        else:
-            if current_group:
-                merged_chunks.append("\n".join(current_group))
-
-            overlap_group = []
-            overlap_size = 0
-            for c in reversed(current_group):
-                c_size = count_tokens(c)
-                if overlap_size + c_size <= chunk_overlap:
-                    overlap_group.insert(0, c)
-                    overlap_size += c_size
-                else:
-                    break
-            current_group = overlap_group + [chunk]
-            current_size = overlap_size + chunk_size_val
-
-    if current_group:
-        merged_chunks.append("\n".join(current_group))
-
-    return merged_chunks
-
-
-def bound_audit_prompt_content(text: str, max_tokens: int = AUDIT_INPUT_TOKEN_LIMIT) -> str:
-    """
-    Keep oversized meeting notes inside the model context while preserving the
-    beginning and final action items, which often carry the most audit signal.
-    """
-    if count_tokens(text) <= max_tokens:
-        return text
-
-    chunks = recursive_split_text(text, chunk_size=800, chunk_overlap=0)
-    if not chunks:
-        return text[:max_tokens]
-
-    notice = (
-        "【输入过长，已按原文顺序保留部分片段用于审计；"
-        "中间超出上下文窗口的内容已省略。】\n"
-    )
-    omitted_notice = "\n【已省略部分中间内容】\n"
-    tail = chunks[-1]
-    selected = [notice]
-    remaining = max_tokens - count_tokens(notice) - count_tokens(omitted_notice) - count_tokens(tail)
-
-    for chunk in chunks[:-1]:
-        chunk_tokens = count_tokens(chunk)
-        if chunk_tokens + 2 > remaining:
-            break
-        selected.append(chunk)
-        remaining -= chunk_tokens + 2
-
-    selected.extend([omitted_notice, tail])
-    bounded_text = "\n\n".join(selected)
-
-    while count_tokens(bounded_text) > max_tokens and len(selected) > 3:
-        selected.pop(-3)
-        bounded_text = "\n\n".join(selected)
-
-    if count_tokens(bounded_text) > max_tokens:
-        half = max(1, (max_tokens - count_tokens(notice) - count_tokens(omitted_notice)) // 2)
-        head = "".join(recursive_split_text(text, chunk_size=half, chunk_overlap=0)[:1])
-        tail = "".join(recursive_split_text(text, chunk_size=half, chunk_overlap=0)[-1:])
-        bounded_text = "\n\n".join([notice, head, omitted_notice, tail])
-
-    return bounded_text
 
 
 async def _fetch_embeddings_async(documents: list[str]) -> list[list[float]]:
@@ -468,140 +298,6 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
     return retrieved_docs
 
 
-def safe_move(src_path, dest_dir, timestamp_func=None):
-    """
-    将文件安全移动至指定目录：
-    - 若目标已有同名文件，自动追加时间戳后缀避免覆盖。
-    """
-    if timestamp_func is None:
-        def default_timestamp():
-            return time.strftime("%Y%m%d_%H%M%S")
-        timestamp_func = default_timestamp
-
-    filename = os.path.basename(src_path)
-    dest_path = os.path.join(dest_dir, filename)
-
-    if os.path.exists(dest_path):
-        base, ext = os.path.splitext(filename)
-        timestamp = timestamp_func()
-        dest_path = os.path.join(dest_dir, f"{base}_{timestamp}{ext}")
-        counter = 1
-        while os.path.exists(dest_path):
-            dest_path = os.path.join(dest_dir, f"{base}_{timestamp}_{counter}{ext}")
-            counter += 1
-
-    shutil.move(src_path, dest_path)
-    return dest_path
-
-
-def unique_file_path(file_path):
-    """
-    返回不会覆盖现有文件的路径：若目标已存在，自动追加递增后缀。
-    """
-    if not os.path.exists(file_path):
-        return file_path
-
-    base, ext = os.path.splitext(file_path)
-    counter = 1
-    candidate = f"{base}_{counter}{ext}"
-    while os.path.exists(candidate):
-        counter += 1
-        candidate = f"{base}_{counter}{ext}"
-    return candidate
-
-
-def extract_json_object(response_text):
-    """
-    从模型输出中提取第一个完整 JSON 对象，兼容 think 标签和代码块。
-    并在返回前尝试自动修复常见的 JSON 语法问题（如尾部多余的逗号）。
-    """
-    text = response_text.strip()
-    if "</think>" in text:
-        text = text.split("</think>")[-1].strip()
-    if "```json" in text:
-        text = text.split("```json", 1)[1]
-    elif "```" in text:
-        text = text.split("```", 1)[1]
-    if "```" in text:
-        text = text.split("```", 1)[0]
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("模型输出中未找到 JSON 对象起始符")
-
-    depth = 0
-    in_string = False
-    escape_next = False
-    end_idx = -1
-    for idx in range(start, len(text)):
-        char = text[idx]
-        if escape_next:
-            escape_next = False
-            continue
-        if char == "\\" and in_string:
-            escape_next = True
-            continue
-        if char == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                end_idx = idx
-                break
-
-    if end_idx == -1:
-        raise ValueError("模型输出中的 JSON 对象不完整")
-
-    json_str = text[start : end_idx + 1].strip()
-
-    # 自动修复一些常见的 JSON 语法瑕疵，例如多余的尾随逗号
-    json_str = re.sub(r',\s*\]', ']', json_str)
-    json_str = re.sub(r',\s*\}', '}', json_str)
-
-    return json_str
-
-
-def markdown_table_cell(value):
-    """
-    转义 Markdown 表格单元格。
-    """
-    return (
-        str(value)
-        .replace("\\", "\\\\")
-        .replace("|", "\\|")
-        .replace("\r", " ")
-        .replace("\n", " ")
-    )
-
-
-def markdown_quote_block(text):
-    return "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
-
-
-def mask_markdown_text(value):
-    return audit_rules.mask_sensitive_evidence(str(value))
-
-
-def mask_output_basename(base_name):
-    return audit_rules.mask_sensitive_evidence(base_name).replace("*", "x")
-
-
-def mask_dataframe_text_columns(df):
-    masked_df = df.copy()
-    for column in masked_df.select_dtypes(include=["object", "string"]).columns:
-        masked_df[column] = masked_df[column].map(
-            lambda value: audit_rules.mask_sensitive_evidence(value)
-            if isinstance(value, str)
-            else value
-        )
-    return masked_df
-
-
 SEMICONDUCTOR_IP_DISCLAIMER = (
     "本报告仅用于技术情报整理、专利文本理解和IP初筛，不构成法律意见、"
     "侵权判断、专利有效性判断或投资建议。所有结论均需由具备资质的专业人士复核。"
@@ -626,22 +322,6 @@ SEMICONDUCTOR_RISK_COLUMNS = [
     "suggested_follow_up",
     "needs_human_review",
 ]
-
-
-def _clean_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
-def _truthy(value: Any) -> bool:
-    return str(value).strip().lower() in {"true", "1", "yes", "y", "是"}
-
-
-def _choice(value: Any, allowed: set[str], default: str) -> str:
-    normalized = _clean_text(value).lower()
-    for item in allowed:
-        if normalized == item.lower():
-            return item
-    return default
 
 
 def validate_semiconductor_ip_result(result: dict[str, Any]) -> dict[str, Any]:
