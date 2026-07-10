@@ -13,6 +13,7 @@ from .config import (
     FAILED,
     INBOX,
     OUTPUT,
+    SESSIONS_DIR,
     SEMICONDUCTOR_IP_CONFIG_DIR,
     VECTOR_STORE_DIR,
 )
@@ -59,6 +60,7 @@ def check_environment():
         CONFIG_DIR,
         SEMICONDUCTOR_IP_CONFIG_DIR,
         VECTOR_STORE_DIR,
+        SESSIONS_DIR,
     ]
     for directory in directories:
         os.makedirs(directory, exist_ok=True)

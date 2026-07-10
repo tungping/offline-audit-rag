@@ -5,6 +5,7 @@ failed/
 inbox/
 recordings/
 output/
+sessions/
 .worktrees/
 
 # Python
