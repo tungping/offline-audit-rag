@@ -161,7 +161,7 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
                 documents = results["documents"][0]
                 distances = results.get("distances", [[]])[0]
                 for document, distance in zip(documents, distances):
-                    if distance < RELEVANCE_THRESHOLD and document not in seen_docs:
+                    if is_relevant_distance(distance) and document not in seen_docs:
                         seen_docs.add(document)
                         all_retrieved.append((document, distance))
                     elif distance >= RELEVANCE_THRESHOLD:
@@ -183,6 +183,13 @@ def retrieve_relevant_context(collection, query_text, top_k=3):
             RELEVANCE_THRESHOLD,
         )
     return retrieved_docs
+
+
+def is_relevant_distance(
+    distance: float, threshold: float = RELEVANCE_THRESHOLD
+) -> bool:
+    """Shared strict distance gate for classic and agent retrieval."""
+    return float(distance) < float(threshold)
 
 
 def rebuild_knowledge_base(mode: str = COMPLIANCE_MODE):
