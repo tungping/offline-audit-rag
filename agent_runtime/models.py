@@ -228,6 +228,9 @@ class AgentSession:
     tool_calls: int
     query_rounds: int
     clarification_rounds: int
+    observations: list[dict[str, Any]]
+    pending_question: str
+    clarification_response: str
     artifact_paths: list[str]
     error: str
     created_at: str
@@ -279,6 +282,9 @@ class AgentSession:
             tool_calls=0,
             query_rounds=0,
             clarification_rounds=0,
+            observations=[],
+            pending_question="",
+            clarification_response="",
             artifact_paths=[],
             error="",
             created_at=now,
@@ -303,6 +309,9 @@ class AgentSession:
             "tool_calls": self.tool_calls,
             "query_rounds": self.query_rounds,
             "clarification_rounds": self.clarification_rounds,
+            "observations": list(self.observations),
+            "pending_question": self.pending_question,
+            "clarification_response": self.clarification_response,
             "artifact_paths": list(self.artifact_paths),
             "error": self.error,
             "created_at": self.created_at,
@@ -328,6 +337,9 @@ class AgentSession:
             tool_calls=int(data.get("tool_calls", 0)),
             query_rounds=int(data.get("query_rounds", 0)),
             clarification_rounds=int(data.get("clarification_rounds", 0)),
+            observations=[dict(item) for item in data.get("observations", [])],
+            pending_question=str(data.get("pending_question", "")),
+            clarification_response=str(data.get("clarification_response", "")),
             artifact_paths=[str(item) for item in data.get("artifact_paths", [])],
             error=str(data.get("error", "")),
             created_at=str(data["created_at"]),

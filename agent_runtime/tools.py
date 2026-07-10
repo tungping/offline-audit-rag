@@ -15,6 +15,12 @@ class ToolAccessError(ValueError):
     """Raised when a requested tool call violates registry policy."""
 
 
+class ToolExecutionError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 @dataclass
 class ToolContext:
     session: AgentSession

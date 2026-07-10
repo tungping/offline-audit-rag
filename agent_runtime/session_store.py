@@ -73,6 +73,11 @@ class SessionStore:
             [evidence.to_dict() for evidence in evidence_list],
         )
 
+    def load_evidence(self, session_id: str) -> list[Evidence]:
+        path = self._session_dir(session_id) / "evidence.json"
+        values = json.loads(path.read_text(encoding="utf-8"))
+        return [Evidence.from_dict(value) for value in values]
+
     def artifact_dir(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "artifacts"
 
