@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import sys
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -76,7 +77,9 @@ def build_live_runtime(
         knowledge_version = _rules_version()
     else:
         patents = load_corpus(CORPUS_PATH)
-        collection = chromadb.Client().get_or_create_collection("synthetic_sic_patents")
+        collection = chromadb.Client().get_or_create_collection(
+            f"synthetic_sic_patents_{uuid.uuid4().hex}"
+        )
 
         def embed(texts):
             return [ollama.embeddings(model=EMBED_MODEL, prompt=text)["embedding"] for text in texts]
