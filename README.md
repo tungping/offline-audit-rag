@@ -112,6 +112,18 @@ uv run python scripts/benchmark_agent.py \
 
 脚本记录实际 elapsed time、调用次数、终态和 session ID 到被 Git 忽略的 `output/`。如果 Ollama 或模型不可用，它只报告错误，不启动服务、不下载模型，也不硬编码成功状态。
 
+真实模型 smoke tests 默认跳过，不影响离线测试门禁。只有 Ollama 已由用户启动且两个模型已经安装时，才显式运行：
+
+```bash
+RUN_OLLAMA_SMOKE=1 uv run pytest -m ollama -q
+```
+
+测试不会启动 Ollama、执行 `ollama pull` 或下载模型。普通确定性门禁可排除这些测试：
+
+```bash
+uv run pytest -m "not ollama" -q
+```
+
 ### 限制
 
 - 这是单机 demo，没有认证、多用户、服务端部署、跨 session 语义记忆或 autonomous knowledge mutation。
