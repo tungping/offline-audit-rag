@@ -12,6 +12,9 @@ from agent_runtime.session_validator import validate_session_bundle
 MEETING_TEXT = Path("examples/agent_demo/meeting_with_gaps.txt").read_text(
     encoding="utf-8"
 )
+PATENT_TEXT = Path("examples/agent_demo/sic_trench_product_brief.txt").read_text(
+    encoding="utf-8"
+)
 
 
 def test_demo_factory_uses_real_runtime_and_valid_artifacts(tmp_path: Path):
@@ -83,6 +86,7 @@ def test_app_meeting_clarification_replay_and_classic_flow(monkeypatch, tmp_path
     session_id = at.session_state["agent_session_id"]
     session_dir = tmp_path / "sessions" / session_id
     assert validate_session_bundle(session_dir).valid
+    assert any("Session status: COMPLETED" in item.value for item in at.caption)
     assert not any(
         button.key == "agent_skip_clarification" for button in at.button
     )
@@ -96,6 +100,28 @@ def test_app_meeting_clarification_replay_and_classic_flow(monkeypatch, tmp_path
     assert any(item.value == "Classic Audit" for item in at.header)
 
 
+def test_app_meeting_submit_clarification_completes(monkeypatch, tmp_path: Path):
+    at = make_app(monkeypatch, tmp_path)
+    at.text_area(key="agent_material").set_value(MEETING_TEXT)
+    at.button(key="agent_approve").click().run(timeout=10)
+    assert sum(
+        button.key == "agent_submit_clarification" for button in at.button
+    ) == 1
+
+    at.text_area(key="agent_clarification_answer").set_value(
+        "负责人是研发负责人，截止日期为本周五，验收标准是完成导出脚本测试。"
+    )
+    at.button(key="agent_submit_clarification").click().run(timeout=10)
+
+    assert not at.exception
+    session_id = at.session_state["agent_session_id"]
+    session_dir = tmp_path / "sessions" / session_id
+    assert validate_session_bundle(session_dir).valid
+    assert not any(
+        button.key == "agent_submit_clarification" for button in at.button
+    )
+
+
 def test_app_switches_to_patent_workspace_without_ollama(monkeypatch, tmp_path: Path):
     at = make_app(monkeypatch, tmp_path)
     at.selectbox(key="agent_workspace_selector").set_value(
@@ -105,7 +131,29 @@ def test_app_switches_to_patent_workspace_without_ollama(monkeypatch, tmp_path: 
     assert any("extract_features" in item.value for item in at.markdown)
 
 
+def test_app_patent_workspace_runs_and_writes_valid_artifacts(
+    monkeypatch, tmp_path: Path
+):
+    at = make_app(monkeypatch, tmp_path)
+    at.selectbox(key="agent_workspace_selector").set_value(
+        "Synthetic SiC Patent Research"
+    ).run()
+    at.text_area(key="agent_material").set_value(PATENT_TEXT)
+    at.button(key="agent_approve").click().run(timeout=10)
+
+    assert not at.exception
+    session_id = at.session_state["agent_session_id"]
+    session_dir = tmp_path / "sessions" / session_id
+    assert validate_session_bundle(session_dir).valid
+    assert {
+        "patent_research_report.md",
+        "patent_retrieval_results.csv",
+        "claim_chart.csv",
+    } <= {path.name for path in (session_dir / "artifacts").iterdir()}
+
+
 def test_playwright_script_contract_is_self_checking():
+    script_text = Path("scripts/playwright_agent_smoke.sh").read_text(encoding="utf-8")
     completed = subprocess.run(
         ["bash", "scripts/playwright_agent_smoke.sh", "--check"],
         capture_output=True,
@@ -116,6 +164,28 @@ def test_playwright_script_contract_is_self_checking():
     assert "npx: ok" in completed.stdout
     assert "playwright wrapper: ok" in completed.stdout
     assert "streamlit: ok" in completed.stdout
+    assert "browser: Brave Browser" in completed.stdout
+    assert "browser executable: /Applications/Brave Browser.app/Contents/MacOS/Brave Browser" in completed.stdout
+    assert "isolated npm/playwright cache: output/playwright" in completed.stdout
     assert "fake mode: AGENT_DEMO_TEST_MODE=1" in completed.stdout
     assert "output: output/playwright" in completed.stdout
     assert "cleanup trap: configured" in completed.stdout
+    assert "for _ in $(seq 1 40); do" in script_text
+    assert "pwcli run-code" not in script_text
+
+
+def test_playwright_script_has_opt_in_live_cancel_flow():
+    script_text = Path("scripts/playwright_agent_smoke.sh").read_text(encoding="utf-8")
+    completed = subprocess.run(
+        ["bash", "scripts/playwright_agent_smoke.sh", "--live-cancel", "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "live cancel mode: local Ollama" in completed.stdout
+    assert '"${1:-}" == "--live-cancel"' in script_text
+    assert "AGENT_DEMO_TEST_MODE" in script_text
+    assert "Cancel Agent" in script_text
+    assert "CANCELLED" in script_text

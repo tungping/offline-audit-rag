@@ -26,18 +26,25 @@ def generate_json_stream(
     system: str,
     prompt: str,
     options: dict[str, int | float],
+    think: bool | None = None,
+    response_format: str | dict[str, Any] | None = None,
     cancel_checker: Callable[[], bool] | None = None,
     generate: Callable[..., Iterable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     chunks: list[str] = []
     generator = generate or ollama.generate
-    stream = generator(
-        model=model,
-        system=system,
-        prompt=prompt,
-        options=options,
-        stream=True,
-    )
+    request: dict[str, Any] = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "options": options,
+        "stream": True,
+    }
+    if think is not None:
+        request["think"] = think
+    if response_format is not None:
+        request["format"] = response_format
+    stream = generator(**request)
     for chunk in stream:
         if cancel_checker and cancel_checker():
             raise InterruptedError("generation cancelled")

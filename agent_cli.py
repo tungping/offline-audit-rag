@@ -47,7 +47,14 @@ def _ollama_json(system: str, prompt: str):
         model=AUDIT_MODEL,
         system=system,
         prompt=prompt,
-        options={"temperature": 0.1, "num_ctx": 8192, "num_keep": 0},
+        options={
+            "temperature": 0.1,
+            "num_ctx": 8192,
+            "num_keep": 0,
+            "num_predict": 512,
+        },
+        think=False,
+        response_format="json",
     )
 
 

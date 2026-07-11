@@ -1,3 +1,4 @@
+import agent_cli
 import app
 from audit_core import artifacts, config, file_ops, formatting, history, models, pipeline, text_processing
 from audit_core import knowledge_base, model_io
@@ -43,6 +44,43 @@ def test_generate_json_stream_uses_injected_generator():
     )
     assert result == {"ok": True}
     generator.assert_called_once()
+
+
+def test_generate_json_stream_forwards_structured_generation_options():
+    generator = mock.Mock(return_value=[{"response": '{"ok": true}'}])
+
+    result = model_io.generate_json_stream(
+        model="demo",
+        system="system",
+        prompt="prompt",
+        options={"temperature": 0.1},
+        think=False,
+        response_format="json",
+        generate=generator,
+    )
+
+    assert result == {"ok": True}
+    generator.assert_called_once_with(
+        model="demo",
+        system="system",
+        prompt="prompt",
+        options={"temperature": 0.1},
+        stream=True,
+        think=False,
+        format="json",
+    )
+
+
+def test_agent_json_generation_is_bounded_and_disables_thinking():
+    with mock.patch.object(
+        agent_cli, "generate_json_stream", return_value={"ok": True}
+    ) as generate:
+        assert agent_cli._ollama_json("system", "prompt") == {"ok": True}
+
+    kwargs = generate.call_args.kwargs
+    assert kwargs["think"] is False
+    assert kwargs["response_format"] == "json"
+    assert kwargs["options"]["num_predict"] == 512
 
 
 def test_app_reexports_legacy_semiconductor_analysis():

@@ -181,6 +181,26 @@ def make_patent_runtime(tmp_path: Path, *, empty=False):
     return runtime, store, session.session_id
 
 
+def test_feature_extraction_prompt_declares_bounded_schema(tmp_path: Path):
+    runtime, _, session_id = make_patent_runtime(tmp_path)
+    captured = {}
+
+    def feature_model(system, prompt):
+        captured.update(system=system, prompt=prompt)
+        return feature_result()
+
+    runtime.services["patent_feature_model"] = feature_model
+    session = runtime.run_until_pause(session_id)
+
+    assert session.status is SessionStatus.COMPLETED
+    assert '"technical_features"' in captured["system"]
+    assert '"keyword_queries"' in captured["system"]
+    assert '"semantic_queries"' in captured["system"]
+    assert '"evidence_quote"' in captured["system"]
+    assert "1 to 6" in captured["system"]
+    assert "exact substring" in captured["system"]
+
+
 def test_patent_golden_path_produces_verified_synthetic_artifacts(tmp_path: Path):
     runtime, store, session_id = make_patent_runtime(tmp_path)
     session = runtime.run_until_pause(session_id)

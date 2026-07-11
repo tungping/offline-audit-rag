@@ -96,6 +96,8 @@ sessions/<session-id>/
 
 默认模型为 `qwen3.5:9b`，embedding 为 `nomic-embed-text`。目标机器为 Apple M1 Pro（8 CPU cores、14 GPU cores、16 GB RAM）。这套硬件说明不是对其他电脑的兼容性承诺。
 
+Agent Demo 的结构化 JSON 调用会关闭 thinking、启用 JSON mode，并把单次输出限制为 512 token，避免 9B 模型在本机进入长时间无界生成；这不改变 Classic Audit 的模型调用配置。
+
 2026-07-11 的 M5 验证中，自动测试与离线安全门禁通过，但 Ollama 服务当时未连接，因此没有可诚实报告的 Live 延迟、成功状态或 Replay 实录。benchmark 命令以非零状态退出且没有生成伪造测量文件。启动 Ollama 并确认两个模型已经存在后，可运行：
 
 ```bash
@@ -140,9 +142,10 @@ Streamlit 的导航、workspace、计划审批、会议澄清、Replay 和 Class
 ```bash
 bash scripts/playwright_agent_smoke.sh --check
 bash scripts/playwright_agent_smoke.sh
+bash scripts/playwright_agent_smoke.sh --live-cancel
 ```
 
-脚本启动隔离端口上的 fake-backed Streamlit，操作会议审批、澄清、Replay 和 Classic 页面，并通过退出 trap 清理服务。日志、snapshot 和 screenshot 只写入被 Git 忽略的 `output/playwright/`。脚本不会执行全局 npm 安装、修复 npm 权限或下载浏览器；缺少这些外部条件时会非零退出并保留准确错误信息。
+默认脚本启动隔离端口上的 fake-backed Streamlit，操作会议审批、澄清、Replay 和 Classic 页面，并通过退出 trap 清理服务。`--live-cancel` 改用本机 Ollama，点击 `Cancel Agent` 并等待页面显示 `Session status: CANCELLED`；该路径要求 Ollama 已启动且 README 中的默认模型可用。脚本会优先使用本机 Brave，其次使用 Chrome，也可通过 `PLAYWRIGHT_BROWSER_EXECUTABLE` 指定其他 Chromium 可执行文件；npm、Playwright daemon 和浏览器 cache 均隔离在被 Git 忽略的 `output/playwright/`。日志、snapshot 和 screenshot 也只写入该目录。脚本不会执行全局 npm 安装、修复 npm 权限或下载浏览器；缺少这些外部条件时会非零退出并保留准确错误信息。
 
 ### 限制
 

@@ -8,6 +8,7 @@ from agent_runtime.models import (
     AgentAction,
     AgentEvent,
     AgentSession,
+    Evidence,
     ResourceBudget,
     SessionStatus,
     Workspace,
@@ -77,6 +78,27 @@ def test_session_round_trip_preserves_nested_types(tmp_path: Path):
     assert loaded.workspace is Workspace.MEETING_AUDIT
     assert loaded.status is SessionStatus.DRAFT_PLAN
     assert loaded.budget == ResourceBudget.meeting_default()
+
+
+def test_session_store_preserves_evidence_ids_that_contain_phone_like_digits(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path)
+    session = make_session()
+    store.create(session)
+    evidence_id = "0b4ffff9b0da416b9a77c15553920893"
+    evidence = Evidence(
+        evidence_id=evidence_id,
+        source_type="synthetic_patent",
+        source_id="SYN-SIC-006",
+        locator="abstract",
+        quote="一种降低界面缺陷并提高栅氧可靠性的处理结构。",
+        source_sha256="a" * 64,
+    )
+
+    store.save_evidence(session.session_id, [evidence])
+
+    assert store.load_evidence(session.session_id)[0].evidence_id == evidence_id
 
 
 def test_session_store_rejects_path_traversal(tmp_path: Path):

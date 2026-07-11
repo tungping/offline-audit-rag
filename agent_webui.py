@@ -300,6 +300,7 @@ def render_agent_demo() -> None:
     runtime = st.session_state.agent_runtime
     if session_id and store is not None:
         session = store.load(session_id)
+        st.caption(f"Session status: {session.status.value}")
         if can_submit_clarification(session):
             st.subheader("4. Clarification")
             st.write(session.pending_question)

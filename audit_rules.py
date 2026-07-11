@@ -4,7 +4,7 @@ from typing import Any
 
 RiskItem = dict[str, Any]
 
-MOBILE_PATTERN = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
+MOBILE_PATTERN = re.compile(r"(?<![A-Za-z0-9])(1[3-9]\d{9})(?![A-Za-z0-9])")
 EMAIL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9._%+\-*])"
     r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
