@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -102,3 +103,19 @@ def test_app_switches_to_patent_workspace_without_ollama(monkeypatch, tmp_path: 
     ).run()
     assert at.session_state["agent_workspace"] == Workspace.PATENT_RESEARCH.value
     assert any("extract_features" in item.value for item in at.markdown)
+
+
+def test_playwright_script_contract_is_self_checking():
+    completed = subprocess.run(
+        ["bash", "scripts/playwright_agent_smoke.sh", "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "npx: ok" in completed.stdout
+    assert "playwright wrapper: ok" in completed.stdout
+    assert "streamlit: ok" in completed.stdout
+    assert "fake mode: AGENT_DEMO_TEST_MODE=1" in completed.stdout
+    assert "output: output/playwright" in completed.stdout
+    assert "cleanup trap: configured" in completed.stdout
