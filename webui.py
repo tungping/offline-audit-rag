@@ -643,6 +643,7 @@ def main() -> None:
         "Experience",
         ["Agent Demo", "Classic Audit"],
         horizontal=True,
+        key="experience_selector",
     )
     if view == "Agent Demo":
         from agent_webui import render_agent_demo

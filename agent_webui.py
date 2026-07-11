@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 import time
@@ -8,6 +9,7 @@ import streamlit as st
 
 from agent_cli import build_live_runtime
 from agent_runtime.evidence import source_sha256
+from agent_runtime.demo_factory import build_demo_runtime
 from agent_runtime.models import SessionStatus, Workspace
 from agent_runtime.replay import ReplayError, load_replay
 from capabilities.meeting_audit.playbook import build_meeting_capability
@@ -103,6 +105,26 @@ def _capability(workspace: Workspace):
     )
 
 
+def build_runtime_for_ui(
+    *, workspace: Workspace, source_text: str, source_name: str
+):
+    if os.getenv("AGENT_DEMO_TEST_MODE") == "1":
+        root = os.getenv("AGENT_DEMO_SESSION_ROOT")
+        if not root:
+            raise ValueError("AGENT_DEMO_SESSION_ROOT is required in test mode")
+        return build_demo_runtime(
+            workspace=workspace,
+            source_text=source_text,
+            source_name=source_name,
+            session_root=Path(root),
+        )
+    return build_live_runtime(
+        workspace=workspace,
+        source_text=source_text,
+        source_name=source_name,
+    )
+
+
 def _start_worker(runtime, session_id: str) -> None:
     cancel_event = threading.Event()
     result_queue = queue.Queue()
@@ -165,7 +187,11 @@ def _render_timeline_and_artifacts(session_dir: Path) -> None:
 
 
 def _render_replay() -> None:
-    session_path = st.text_input("Session directory", placeholder="sessions/<session-id>")
+    session_path = st.text_input(
+        "Session directory",
+        placeholder="sessions/<session-id>",
+        key="agent_replay_path",
+    )
     if not session_path:
         st.info("Replay is read-only and performs no model, embedding, planner, or tool calls.")
         return
@@ -187,14 +213,21 @@ def render_agent_demo() -> None:
     init_agent_state()
     _poll_worker()
     st.header("Agent Demo")
-    mode = st.radio("Mode", ["LIVE", "REPLAY"], horizontal=True)
+    mode = st.radio(
+        "Mode",
+        ["LIVE", "REPLAY"],
+        horizontal=True,
+        key="agent_mode_selector",
+    )
     st.session_state.agent_mode = mode
     st.caption(agent_mode_badge(mode))
     if mode == "REPLAY":
         _render_replay()
         return
 
-    label = st.selectbox("Workspace", list(WORKSPACE_LABELS))
+    label = st.selectbox(
+        "Workspace", list(WORKSPACE_LABELS), key="agent_workspace_selector"
+    )
     workspace = Workspace(WORKSPACE_LABELS[label])
     st.session_state.agent_workspace = workspace.value
     st.subheader("1. Goal & Material")
@@ -203,7 +236,7 @@ def render_agent_demo() -> None:
         if workspace is Workspace.MEETING_AUDIT
         else "检索与沟槽底部屏蔽结构相关的 synthetic patents"
     )
-    goal = st.text_input("Goal", value=default_goal)
+    goal = st.text_input("Goal", value=default_goal, key="agent_goal")
     uploaded = st.file_uploader("Upload TXT", type=list(material_policy(workspace)["extensions"]), key="agent_upload")
     pasted = st.text_area("Paste text material", height=180, key="agent_material")
     source_text = pasted
@@ -217,12 +250,17 @@ def render_agent_demo() -> None:
             source_text = ""
 
     _render_plan(workspace)
-    if st.button("Approve Plan & Run", type="primary", disabled=st.session_state.agent_running):
+    if st.button(
+        "Approve Plan & Run",
+        type="primary",
+        disabled=st.session_state.agent_running,
+        key="agent_approve",
+    ):
         if not goal.strip() or not source_text.strip():
             st.warning("Goal and text material are required.")
         else:
             try:
-                runtime, knowledge_version = build_live_runtime(
+                runtime, knowledge_version = build_runtime_for_ui(
                     workspace=workspace,
                     source_text=source_text,
                     source_name=source_name,
@@ -246,7 +284,7 @@ def render_agent_demo() -> None:
 
     if st.session_state.agent_running:
         st.info("Agent is running serially. Progress is persisted to the session bundle.")
-        if st.button("Cancel Agent"):
+        if st.button("Cancel Agent", key="agent_cancel"):
             cancel_agent_session(
                 st.session_state.agent_cancel_event,
                 st.session_state.agent_runtime,
@@ -267,11 +305,15 @@ def render_agent_demo() -> None:
             st.write(session.pending_question)
             answer = st.text_area("Clarification answer", key="agent_clarification_answer")
             cols = st.columns(2)
-            if cols[0].button("Submit clarification") and answer.strip():
+            if cols[0].button(
+                "Submit clarification", key="agent_submit_clarification"
+            ) and answer.strip():
                 runtime.submit_clarification(session_id, answer)
                 _start_worker(runtime, session_id)
                 st.rerun()
-            if cols[1].button("Skip clarification"):
+            if cols[1].button(
+                "Skip clarification", key="agent_skip_clarification"
+            ):
                 runtime.skip_clarification(session_id)
                 _start_worker(runtime, session_id)
                 st.rerun()
