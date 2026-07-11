@@ -1,7 +1,7 @@
 [project]
 name = "offline-auto-audit"
 version = "0.1.0"
-description = "100% offline compliance auto auditing tool"
+description = "Bounded local agent demo for meeting audit and synthetic SiC patent research"
 readme = "README.md"
 license = { text = "GPL-3.0-only" }
 requires-python = ">=3.10"

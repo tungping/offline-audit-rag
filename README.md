@@ -1,7 +1,124 @@
-# 📋 Offline Auto Audit
+# Offline Auto Audit — Local Agent Demo
 
-> **100% 离线、零成本** 的本地企业合规审计系统。  
-> 自动监听录音音频或会议文本，对照合规标准进行审计，输出任务指派 CSV、风险项 CSV 与 Markdown 审计报告组成的审计包。
+> One bounded local agent runtime with two isolated workspaces:
+> Technical Project Meeting Audit and Synthetic SiC Patent Research.
+
+这是一个本地、串行、资源受限的 agent demo，同时保留原有的 Classic Audit 工作流。用户必须明确选择 `meeting_audit` 或 `patent_research`；运行时不会根据输入自行跨 workspace，也不会动态注册工具、执行 shell 或修改知识库。
+
+## Agent Demo：能力边界
+
+### Live 与 Replay
+
+- **Live**：在用户批准计划后，调用本机 Ollama、受限工具和确定性 playbook，实时创建 `sessions/<session-id>/`。它是真实执行，可能完成、等待澄清、失败、中止或因预算耗尽而标记为 `INCOMPLETE`。
+- **Replay**：只读取已有 session bundle 中的事件、证据和产物清单。它不调用模型、embedding、planner 或工具，也不是“重演推理”。
+- 两种模式始终显示不同标识；Replay 不会在 Live 失败时被静默替代。
+
+### 两条黄金路径
+
+`meeting_audit` 面向技术项目会议：
+
+1. 提取决策和任务，并验证引用确实存在于会议原文。
+2. 检索本地规则，运行敏感信息、模糊表述、SOP 和发布流程检查。
+3. 对缺失负责人、截止日期或验收标准发起一次合并澄清；用户可以回答或明确跳过。
+4. 写出 `meeting_audit_report.md`、`tasks.csv` 和 `risk_items.csv`。
+
+`patent_research` 只面向项目内的 synthetic SiC 功率器件语料：
+
+1. 从产品 brief 提取有原文证据的技术特征和查询。
+2. 结合可解释关键词评分、语义检索和 reciprocal-rank fusion 排序候选。
+3. 只允许读取本 session 已检索到的 synthetic document ID，并生成 claim chart。
+4. 两轮仍无结果时诚实结束为 `INCOMPLETE`，不编造专利或完成报告。
+5. 写出 `patent_research_report.md`、`patent_retrieval_results.csv` 和 `claim_chart.csv`。
+
+专利 corpus 固定为 10 条项目自建的合成记录。它们不是公开专利、没有真实申请人或公开号，仅用于验证检索、证据和报告链路。输出不构成新颖性、有效性、侵权、不侵权或 FTO 法律意见。
+
+### 资源预算
+
+| Workspace | 最大模型调用 | 最大工具调用 | 最大查询轮次 | 最大澄清次数 |
+|---|---:|---:|---:|---:|
+| `meeting_audit` | 4 | 10 | 2 | 1 |
+| `patent_research` | 5 | 14 | 2 | 1 |
+
+这是一组 hard budget，不是延迟或质量 SLA。runtime 只串行执行，不运行多 agent 或并行工具。
+
+### CLI
+
+会议 Live：
+
+```bash
+uv run python agent_cli.py live \
+  --workspace meeting_audit \
+  --goal "检查会议中的发布流程和任务完整性" \
+  --input examples/agent_demo/meeting_with_gaps.txt
+```
+
+合成专利 Live：
+
+```bash
+uv run python agent_cli.py live \
+  --workspace patent_research \
+  --goal "检索与沟槽底部屏蔽结构相关的 synthetic patents" \
+  --input examples/agent_demo/sic_trench_product_brief.txt
+```
+
+两条命令都会先打印 Proposed Plan，并默认要求输入 `y`；自动化环境可显式使用 `--approve-plan`。查看 session 时使用：
+
+```bash
+uv run python agent_cli.py replay --session sessions/<session-id>
+```
+
+### Streamlit
+
+```bash
+uv run streamlit run webui.py
+```
+
+页面首先显示 **Agent Demo**，其次是 **Classic Audit**。Agent Demo 提供 workspace、Live/Replay、目标与材料、计划审批、执行时间线、一次性澄清、取消以及证据/产物清单。规则编辑、corpus 重建和音频处理不在运行中的 agent session 内开放；这些 Classic 功能仍保留在原页面。
+
+### Session bundle 与证据
+
+每个 Live session 使用原子写入和 append-only 事件日志：
+
+```text
+sessions/<session-id>/
+├── request.json
+├── session.json
+├── events.jsonl
+├── evidence.json
+└── artifacts/
+```
+
+关键报告引用使用 `evidence_id` 连接到 `evidence.json`。会议原始文本不会写入 session；持久化字符串会经过敏感信息遮蔽。Replay 保留创建 session 时的模型、知识版本和历史产物路径，并可提示当前知识版本不同。
+
+输入材料和模型输出始终按不可信数据处理。会议中的“忽略规则”“切换 workspace”“读取 `.env`”或“调用 shell”等文字不会改变 workspace、工具 allowlist 或文件边界。专利模型在检索前不得提供 document ID，候选读取也受本 session 的检索结果约束。
+
+### 本机模型与测量状态
+
+默认模型为 `qwen3.5:9b`，embedding 为 `nomic-embed-text`。目标机器为 Apple M1 Pro（8 CPU cores、14 GPU cores、16 GB RAM）。这套硬件说明不是对其他电脑的兼容性承诺。
+
+2026-07-11 的 M5 验证中，自动测试与离线安全门禁通过，但 Ollama 服务当时未连接，因此没有可诚实报告的 Live 延迟、成功状态或 Replay 实录。benchmark 命令以非零状态退出且没有生成伪造测量文件。启动 Ollama 并确认两个模型已经存在后，可运行：
+
+```bash
+uv run python scripts/benchmark_agent.py \
+  --workspace meeting_audit \
+  --goal "检查发布流程、任务完整性和敏感信息" \
+  --input examples/agent_demo/meeting_with_gaps.txt
+
+uv run python scripts/benchmark_agent.py \
+  --workspace patent_research \
+  --goal "检索与沟槽底部屏蔽结构相关的 synthetic patents" \
+  --input examples/agent_demo/sic_trench_product_brief.txt
+```
+
+脚本记录实际 elapsed time、调用次数、终态和 session ID 到被 Git 忽略的 `output/`。如果 Ollama 或模型不可用，它只报告错误，不启动服务、不下载模型，也不硬编码成功状态。
+
+### 限制
+
+- 这是单机 demo，没有认证、多用户、服务端部署、跨 session 语义记忆或 autonomous knowledge mutation。
+- Agent Demo 只接受粘贴文本或 TXT；Classic Audit 继续提供可选音频转录。
+- 专利研究不连接 Google Patents、Espacenet、WIPO、CNIPA 或任何真实专利 API，也不解析真实 PDF/OCR。
+- 模型生成仍可能失败；证据验证、确定性规则和预算用于限制失败范围，而不是保证结论正确。
+- Live 需要本机 Ollama 和对应模型；Replay 只需要一个完整、可信的 session bundle。
 
 ---
 
