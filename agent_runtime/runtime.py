@@ -316,6 +316,9 @@ class AgentRuntime:
                 "evidence_ids": [item.evidence_id for item in result.evidence],
             }
         )
+        artifact_paths = result.data.get("artifact_paths")
+        if isinstance(artifact_paths, list):
+            session.artifact_paths = [str(path) for path in artifact_paths]
         self.store.save(session)
         self._append_event(
             session,
