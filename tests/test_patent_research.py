@@ -24,6 +24,9 @@ from capabilities.patent_research.tools import register_patent_tools
 
 
 CORPUS = Path("capabilities/patent_research/corpus/synthetic_sic_patents.jsonl")
+PATENT_EVAL_CASES = json.loads(
+    Path("tests/fixtures/agent_eval/patent_cases.json").read_text(encoding="utf-8")
+)
 
 
 def test_synthetic_corpus_is_valid_and_explicitly_synthetic():
@@ -223,3 +226,82 @@ def test_patent_no_result_stops_incomplete_without_fabrication(tmp_path: Path):
         for path in (store.artifact_dir(session_id).parent).glob("*.json*")
     )
     assert "SYN-SIC-999" not in persisted
+
+
+@pytest.mark.parametrize("case", PATENT_EVAL_CASES, ids=lambda case: case["case_id"])
+def test_patent_evaluation_contract(tmp_path: Path, case):
+    patents = load_corpus(CORPUS)
+    registry = ToolRegistry()
+    register_patent_tools(registry)
+    feature_result = {
+        "technical_features": [{
+            "feature_id": "F1",
+            "feature": case["feature"],
+            "synonyms": [],
+            "evidence_quote": case["feature"],
+        }],
+        "keyword_queries": case["keyword_queries"],
+        "semantic_queries": [case["feature"]],
+    }
+    semantic_hits = [
+        PatentHit(document_id, 1.0 / rank, frozenset({"semantic"}), semantic_rank=rank, semantic_locator="claim:C1")
+        for rank, document_id in enumerate(case["semantic_ids"], 1)
+    ]
+    services = {
+        "source_text": case["source_text"],
+        "source_id": f"{case['case_id']}.txt",
+        "patent_state": {},
+        "patent_corpus": patents,
+        "patent_feature_model": lambda system, prompt: feature_result,
+        "patent_keyword_search": keyword_search,
+        "patent_semantic_search": lambda queries, limit: semantic_hits,
+    }
+    store = SessionStore(tmp_path / "sessions")
+    runtime = AgentRuntime(
+        store=store,
+        registry=registry,
+        planner=PatentPlaybookPlanner(),
+        capability=build_patent_capability(),
+        services=services,
+    )
+    session = runtime.create_session(
+        goal="固定专利评估",
+        source_name=f"{case['case_id']}.txt",
+        source_sha256=source_sha256(case["source_text"]),
+        model_name="fake",
+        knowledge_version=corpus_version(CORPUS),
+    )
+    runtime.approve(session.session_id)
+    session = runtime.run_until_pause(session.session_id)
+
+    assert session.status.value == case["expected_status"]
+    assert session.model_calls <= case["max_model_calls"]
+    assert session.tool_calls <= case["max_tool_calls"]
+    assert session.query_rounds <= case["max_query_rounds"]
+    observations = [
+        item for item in session.observations
+        if item.get("tool_name") == "patent.semantic_search"
+    ]
+    candidates = observations[-1]["data"]["candidates"]
+    for expected in case["expected_candidate_ids"]:
+        assert expected in candidates[:2]
+    if case["requires_evidence"]:
+        evidence = store.load_evidence(session.session_id)
+        assert evidence
+        source_texts = {case["source_text"]}
+        for patent in patents:
+            source_texts.add(patent.abstract)
+            source_texts.update(claim.text for claim in patent.claims)
+        assert all(any(item.quote in text for text in source_texts) for item in evidence)
+    if session.status is SessionStatus.COMPLETED:
+        report = (store.artifact_dir(session.session_id) / "patent_research_report.md").read_text(encoding="utf-8")
+        assert all(
+            heading in report
+            for heading in ("目标与范围", "排名候选", "权利要求对比", "证据索引", "不构成法律意见")
+        )
+    else:
+        assert not (store.artifact_dir(session.session_id) / "patent_research_report.md").exists()
+    assert all(
+        item.get("tool_name", "").startswith("patent.")
+        for item in session.observations if item.get("tool_name")
+    )

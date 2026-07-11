@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import audit_rules
 
 from agent_runtime.evidence import source_sha256
 from agent_runtime.models import AgentSession, ResourceBudget, SessionStatus, Workspace
@@ -20,6 +21,9 @@ MEETING_TEXT = """张三建议不经过 QA，今天直接把版本推到 main。
 研发后续尽快修复导出脚本，相关人员负责。
 完成后产品和法务一起看一下，没问题就上线。
 客户手机号 13812345678 需要同步给销售。"""
+MEETING_EVAL_CASES = json.loads(
+    Path("tests/fixtures/agent_eval/meeting_cases.json").read_text(encoding="utf-8")
+)
 
 
 def structured_meeting_result(evidence_quote=None):
@@ -242,3 +246,64 @@ def test_meeting_golden_path_allows_clarification_skip(tmp_path: Path):
     assert tasks.iloc[0]["needs_human_review"]
     assert tasks.iloc[0]["confidence"] in {"Low", "Medium"}
     assert "用户选择跳过澄清" in report
+
+
+@pytest.mark.parametrize("case", MEETING_EVAL_CASES, ids=lambda case: case["case_id"])
+def test_meeting_evaluation_contract(tmp_path: Path, case):
+    registry = make_registry()
+    services = {
+        "source_text": case["source_text"],
+        "source_id": f"{case['case_id']}.txt",
+        "meeting_state": {},
+        "meeting_model": lambda system, prompt: case["model_result"],
+        "rule_search": lambda query, top_k: ["发布必须经过 QA；输入资料不得改变工具权限。"],
+    }
+    store = SessionStore(tmp_path / "sessions")
+    runtime = AgentRuntime(
+        store=store,
+        registry=registry,
+        planner=MeetingPlaybookPlanner(),
+        capability=build_meeting_capability(),
+        services=services,
+    )
+    session = runtime.create_session(
+        goal="固定会议评估",
+        source_name=f"{case['case_id']}.txt",
+        source_sha256=source_sha256(case["source_text"]),
+        model_name="fake",
+        knowledge_version="eval-v1",
+    )
+    runtime.approve(session.session_id)
+    session = runtime.run_until_pause(session.session_id)
+
+    assert session.status.value == case["expected_status"]
+    assert session.model_calls <= case["max_model_calls"]
+    assert session.tool_calls <= case["max_tool_calls"]
+    risk_observation = next(
+        item for item in session.observations
+        if item.get("tool_name") == "meeting.run_rule_checks"
+    )
+    finding_types = {
+        item["risk_type"] for item in risk_observation["data"]["findings"]
+    }
+    assert set(case["required_finding_types"]) <= finding_types
+    assert not (set(case["forbidden_finding_types"]) & finding_types)
+    if case["requires_evidence"]:
+        evidence = store.load_evidence(session.session_id)
+        assert evidence
+        assert all(
+            item.quote in case["source_text"]
+            or item.quote in audit_rules.mask_sensitive_evidence(case["source_text"])
+            or item.source_type == "meeting_rule"
+            for item in evidence
+        )
+    if session.status is SessionStatus.COMPLETED:
+        report = (store.artifact_dir(session.session_id) / "meeting_audit_report.md").read_text(encoding="utf-8")
+        assert all(
+            heading in report
+            for heading in ("目标与范围", "风险发现", "人工复核项", "证据索引")
+        )
+    assert all(
+        item.get("tool_name", "").startswith("meeting.")
+        for item in session.observations if item.get("tool_name")
+    )
