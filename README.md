@@ -112,6 +112,38 @@ uv run python scripts/benchmark_agent.py \
 
 脚本记录实际 elapsed time、调用次数、终态和 session ID 到被 Git 忽略的 `output/`。如果 Ollama 或模型不可用，它只报告错误，不启动服务、不下载模型，也不硬编码成功状态。
 
+真实模型 smoke tests 默认跳过，不影响离线测试门禁。只有 Ollama 已由用户启动且两个模型已经安装时，才显式运行：
+
+```bash
+RUN_OLLAMA_SMOKE=1 uv run pytest -m ollama -q
+```
+
+测试不会启动 Ollama、执行 `ollama pull` 或下载模型。普通确定性门禁可排除这些测试：
+
+```bash
+uv run pytest -m "not ollama" -q
+```
+
+### 自动化验证层
+
+校验任意已保存 session 的格式、预算、证据、脱敏和产物契约：
+
+```bash
+uv run python scripts/validate_agent_session.py sessions/<session-id>
+uv run python scripts/validate_agent_session.py sessions/<session-id> --json
+```
+
+Streamlit 的导航、workspace、计划审批、会议澄清、Replay 和 Classic 切换由 `streamlit.testing.v1.AppTest` 在默认 pytest 中使用 deterministic adapters 自动覆盖。适配器只替换模型和检索结果；runtime、状态机、工具、证据持久化和产物写入仍使用生产实现。只有环境变量严格等于 `AGENT_DEMO_TEST_MODE=1` 时才允许启用，正常 UI 不会静默进入 fake mode。
+
+真实浏览器 smoke 是可选门禁，需要 Node.js/npm、`npx`、可执行的 Playwright CLI wrapper 和可用的 Playwright 浏览器：
+
+```bash
+bash scripts/playwright_agent_smoke.sh --check
+bash scripts/playwright_agent_smoke.sh
+```
+
+脚本启动隔离端口上的 fake-backed Streamlit，操作会议审批、澄清、Replay 和 Classic 页面，并通过退出 trap 清理服务。日志、snapshot 和 screenshot 只写入被 Git 忽略的 `output/playwright/`。脚本不会执行全局 npm 安装、修复 npm 权限或下载浏览器；缺少这些外部条件时会非零退出并保留准确错误信息。
+
 ### 限制
 
 - 这是单机 demo，没有认证、多用户、服务端部署、跨 session 语义记忆或 autonomous knowledge mutation。

@@ -21,3 +21,6 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "ollama: opt-in tests that require a running local Ollama and installed models",
+]
