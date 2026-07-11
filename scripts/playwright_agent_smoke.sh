@@ -7,8 +7,12 @@ OUTPUT_DIR="$ROOT_DIR/output/playwright"
 STREAMLIT_PID=""
 SESSION_NAME="agent-smoke-$$"
 TEMP_ROOT=""
+CHECK_ONLY=0
 
 cleanup() {
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    return
+  fi
   if [[ -n "$STREAMLIT_PID" ]] && kill -0 "$STREAMLIT_PID" 2>/dev/null; then
     kill "$STREAMLIT_PID" 2>/dev/null || true
     wait "$STREAMLIT_PID" 2>/dev/null || true
@@ -45,7 +49,9 @@ check_prerequisites() {
 }
 
 if [[ "${1:-}" == "--check" ]]; then
+  CHECK_ONLY=1
   check_prerequisites
+  trap - EXIT INT TERM
   exit 0
 fi
 
