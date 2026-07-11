@@ -1,0 +1,41 @@
+[
+  {
+    "case_id": "P1",
+    "source_text": "拟研究一款沟槽栅 SiC MOSFET。沟槽底部屏蔽区与源极相连，用于降低栅介质电场并改善可靠性。",
+    "feature": "沟槽底部屏蔽区",
+    "keyword_queries": [["沟槽", "底部屏蔽区", "栅介质电场"]],
+    "semantic_ids": ["SYN-SIC-009", "SYN-SIC-001"],
+    "expected_status": "COMPLETED",
+    "expected_candidate_ids": ["SYN-SIC-001", "SYN-SIC-009"],
+    "max_model_calls": 5,
+    "max_tool_calls": 14,
+    "max_query_rounds": 2,
+    "requires_evidence": true
+  },
+  {
+    "case_id": "P2",
+    "source_text": "拟研究 SiC 功率器件的边缘耐压结构，重点是结终端扩展区与场限环。",
+    "feature": "结终端扩展区与场限环",
+    "keyword_queries": [["结终端扩展区", "场限环", "边缘终端"]],
+    "semantic_ids": ["SYN-SIC-005"],
+    "expected_status": "COMPLETED",
+    "expected_candidate_ids": ["SYN-SIC-005"],
+    "max_model_calls": 5,
+    "max_tool_calls": 14,
+    "max_query_rounds": 2,
+    "requires_evidence": true
+  },
+  {
+    "case_id": "P3",
+    "source_text": "拟研究锂离子电池正极中的高镍三元正极材料和电解液配方。",
+    "feature": "高镍三元正极材料",
+    "keyword_queries": [["高镍三元", "电解液", "锂离子电池"]],
+    "semantic_ids": [],
+    "expected_status": "INCOMPLETE",
+    "expected_candidate_ids": [],
+    "max_model_calls": 5,
+    "max_tool_calls": 14,
+    "max_query_rounds": 2,
+    "requires_evidence": true
+  }
+]

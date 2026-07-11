@@ -134,7 +134,7 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             test_output = os.path.join(tmp_dir, "output")
             os.makedirs(test_output)
-            with mock.patch("app.OUTPUT", test_output):
+            with mock.patch("audit_core.pipeline.OUTPUT", test_output):
                 result = app.write_semiconductor_ip_outputs(
                     source_file="sic_demo.txt",
                     content="一种碳化硅沟槽栅MOSFET器件，包括沟槽和栅介质层。",
@@ -167,6 +167,7 @@ class AppTests(unittest.TestCase):
                             ],
                         }
                     ),
+                    output_dir=test_output,
                 )
 
                 self.assertTrue(result.success)
@@ -276,7 +277,7 @@ class AppTests(unittest.TestCase):
             os.makedirs(test_output)
             
             # 补丁路径
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 test_file = os.path.join(test_inbox, "test_meeting.txt")
                 with open(test_file, 'w', encoding='utf-8') as f:
                     f.write(
@@ -364,7 +365,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write("客户手机号 13812345678，邮箱 zhangsan@example.com，需要安排回访。")
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 with self.assertLogs(level="ERROR") as log_cm:
                     success = app.process_file(test_file, mock_collection)
 
@@ -397,7 +398,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write("本次会议流程正常，无异常事项。")
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 success = app.process_file(test_file, mock_collection)
 
             self.assertTrue(success)
@@ -440,7 +441,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write("本次会议流程正常，无异常事项。")
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 result = app.process_file_with_result(
                     test_file,
                     mock_collection,
@@ -472,7 +473,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write("本次会议流程正常，无异常事项。")
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 result = app.process_file_with_result(test_file, mock_collection)
 
             self.assertTrue(result.success)
@@ -532,7 +533,7 @@ class AppTests(unittest.TestCase):
             test_file = os.path.join(tmp_dir, "sic_demo.txt")
             Path(test_file).write_text("沟槽内设置栅介质层和栅电极。", encoding="utf-8")
 
-            with mock.patch("app.OUTPUT", test_output):
+            with mock.patch("audit_core.pipeline.OUTPUT", test_output):
                 result = app.process_file_with_result(
                     test_file,
                     mock_collection,
@@ -576,7 +577,7 @@ class AppTests(unittest.TestCase):
             test_output = os.path.join(tmp_dir, "output")
             os.makedirs(test_output)
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 test_file = os.path.join(tmp_dir, "empty_rag.txt")
                 with open(test_file, 'w', encoding='utf-8') as f:
                     f.write("本次会议流程正常，无异常事项。")
@@ -617,7 +618,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write(long_text)
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 result = app.process_file_with_result(test_file, mock_collection)
 
         self.assertTrue(result.success)
@@ -774,7 +775,7 @@ class AppTests(unittest.TestCase):
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write("张三直接 push 到 main，客户手机号 13812345678 需要同步销售。")
 
-            with mock.patch('app.OUTPUT', test_output):
+            with mock.patch('audit_core.pipeline.OUTPUT', test_output):
                 result = app.process_file_with_result(test_file, mock_collection)
 
             self.assertTrue(result.success)

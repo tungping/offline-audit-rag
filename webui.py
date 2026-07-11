@@ -320,16 +320,11 @@ def render_history() -> None:
     st.dataframe(pd.DataFrame(summary["recent_entries"]), width="stretch", hide_index=True)
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="Offline Auto Audit",
-        page_icon="📋",
-        layout="wide",
-    )
+def render_classic_workflow() -> None:
     init_audit_state()
     poll_audit_result()
 
-    st.title("Offline Auto Audit")
+    st.header("Classic Audit")
 
     with st.sidebar:
         st.subheader("本地模型")
@@ -635,6 +630,26 @@ def main() -> None:
 
     if st.session_state.audit_error:
         st.error(f"审计异常：{st.session_state.audit_error}")
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Offline Auto Audit",
+        page_icon="📋",
+        layout="wide",
+    )
+    st.title("Offline Auto Audit")
+    view = st.radio(
+        "Experience",
+        ["Agent Demo", "Classic Audit"],
+        horizontal=True,
+    )
+    if view == "Agent Demo":
+        from agent_webui import render_agent_demo
+
+        render_agent_demo()
+    else:
+        render_classic_workflow()
 
 
 if __name__ == "__main__":
