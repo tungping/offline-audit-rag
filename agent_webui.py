@@ -22,6 +22,7 @@ WORKSPACE_LABELS = {
 }
 AGENT_STATE_DEFAULTS = {
     "agent_workspace": Workspace.MEETING_AUDIT.value,
+    "agent_goal_workspace": "",
     "agent_mode": "LIVE",
     "agent_session_id": "",
     "agent_running": False,
@@ -82,9 +83,17 @@ def can_submit_clarification(session) -> bool:
     )
 
 
-def cancel_agent_session(cancel_event, runtime, session_id: str) -> None:
+def cancel_agent_session(
+    cancel_event,
+    runtime,
+    session_id: str,
+    state: MutableMapping[str, Any] | None = None,
+):
     cancel_event.set()
-    runtime.cancel(session_id)
+    session = runtime.cancel(session_id)
+    if state is not None:
+        state["agent_running"] = False
+    return session
 
 
 def run_agent_worker(runtime, session_id: str, cancel_event, result_queue) -> None:
@@ -236,7 +245,11 @@ def render_agent_demo() -> None:
         if workspace is Workspace.MEETING_AUDIT
         else "检索与沟槽底部屏蔽结构相关的 synthetic patents"
     )
-    goal = st.text_input("Goal", value=default_goal, key="agent_goal")
+    if st.session_state.get("agent_goal_workspace") != workspace.value:
+        st.session_state.agent_goal = default_goal
+        st.session_state.agent_goal_workspace = workspace.value
+    st.session_state.agent_workspace = workspace.value
+    goal = st.text_input("Goal", key="agent_goal")
     uploaded = st.file_uploader("Upload TXT", type=list(material_policy(workspace)["extensions"]), key="agent_upload")
     pasted = st.text_area("Paste text material", height=180, key="agent_material")
     source_text = pasted
@@ -289,6 +302,7 @@ def render_agent_demo() -> None:
                 st.session_state.agent_cancel_event,
                 st.session_state.agent_runtime,
                 st.session_state.agent_session_id,
+                st.session_state,
             )
             st.rerun()
         time.sleep(0.5)

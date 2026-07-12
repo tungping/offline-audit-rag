@@ -128,6 +128,9 @@ def test_app_switches_to_patent_workspace_without_ollama(monkeypatch, tmp_path: 
         "Synthetic SiC Patent Research"
     ).run()
     assert at.session_state["agent_workspace"] == Workspace.PATENT_RESEARCH.value
+    assert at.text_input(key="agent_goal").value == (
+        "检索与沟槽底部屏蔽结构相关的 synthetic patents"
+    )
     assert any("extract_features" in item.value for item in at.markdown)
 
 

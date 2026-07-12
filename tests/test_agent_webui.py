@@ -67,10 +67,18 @@ def test_clarification_submission_is_allowed_once():
 def test_cancel_event_reaches_runtime_cancel():
     event = threading.Event()
     cancelled = []
-    runtime = SimpleNamespace(cancel=lambda session_id: cancelled.append(session_id))
-    cancel_agent_session(event, runtime, "abc")
+    runtime = SimpleNamespace(
+        cancel=lambda session_id: (
+            cancelled.append(session_id),
+            SimpleNamespace(status=SessionStatus.CANCELLED),
+        )[1]
+    )
+    state = {"agent_running": True}
+    result = cancel_agent_session(event, runtime, "abc", state)
     assert event.is_set()
     assert cancelled == ["abc"]
+    assert result.status is SessionStatus.CANCELLED
+    assert state["agent_running"] is False
 
 
 def test_agent_state_uses_required_prefix_and_worker_returns_only_id_status():

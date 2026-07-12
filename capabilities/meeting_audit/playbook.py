@@ -50,7 +50,17 @@ class MeetingPlaybookPlanner:
                 for item in session.observations
             )
             if questions and not answered:
-                question = "\n".join(item["question"] for item in questions[:5])
+                grouped: dict[str, list[str]] = {}
+                for item in questions[:5]:
+                    grouped.setdefault(str(item["question"]), []).append(
+                        str(item.get("task_name", ""))
+                    )
+                question = "\n".join(
+                    f"{prompt}（任务：{'、'.join(name for name in task_names if name)}）"
+                    if any(task_names)
+                    else prompt
+                    for prompt, task_names in grouped.items()
+                )
                 return PlannedAction(
                     AgentAction.clarification(question), model_calls=0
                 )

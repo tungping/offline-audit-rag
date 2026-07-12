@@ -137,6 +137,46 @@ def test_rule_checks_preserve_deterministic_findings_and_build_clarification(tmp
     ]
 
 
+def test_clarification_playbook_groups_duplicate_questions_by_task():
+    session = AgentSession.new(
+        workspace=Workspace.MEETING_AUDIT,
+        goal="检查会议任务",
+        source_name="meeting.txt",
+        source_sha256="a" * 64,
+        model_name="demo",
+        knowledge_version="rules-v1",
+        budget=ResourceBudget.meeting_default(),
+    )
+    session.current_stage = "clarification"
+    session.observations = [
+        {
+            "tool_name": "meeting.run_rule_checks",
+            "data": {
+                "clarification": {
+                    "questions": [
+                        {
+                            "task_name": "任务 A",
+                            "question": "请补充该任务的负责人、截止时间和验收标准。",
+                        },
+                        {
+                            "task_name": "任务 B",
+                            "question": "请补充该任务的负责人、截止时间和验收标准。",
+                        },
+                    ]
+                }
+            },
+        }
+    ]
+
+    action = MeetingPlaybookPlanner().next_action(
+        session, build_meeting_capability()
+    ).action
+
+    assert action.question.count("请补充该任务的负责人、截止时间和验收标准。") == 1
+    assert "任务 A" in action.question
+    assert "任务 B" in action.question
+
+
 def test_write_artifacts_stays_inside_session_artifacts(tmp_path: Path):
     context = make_context(tmp_path)
     registry = make_registry()
