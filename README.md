@@ -98,7 +98,14 @@ sessions/<session-id>/
 
 Agent Demo 的结构化 JSON 调用会关闭 thinking、启用 JSON mode，并把单次输出限制为 512 token，避免 9B 模型在本机进入长时间无界生成；这不改变 Classic Audit 的模型调用配置。
 
-2026-07-11 的 M5 验证中，自动测试与离线安全门禁通过，但 Ollama 服务当时未连接，因此没有可诚实报告的 Live 延迟、成功状态或 Replay 实录。benchmark 命令以非零状态退出且没有生成伪造测量文件。启动 Ollama 并确认两个模型已经存在后，可运行：
+2026-07-12 在上述 M1 Pro 上各执行了一次真实 Live benchmark；结果是单次实测，不是 SLA：
+
+| Workspace | 耗时 | 模型调用 | 工具调用 | Query rounds | 状态 |
+|---|---:|---:|---:|---:|---|
+| `meeting_audit` | 26.627 秒 | 1 | 5 | 0 | `COMPLETED` |
+| `patent_research` | 23.993 秒 | 1 | 8 | 1 | `COMPLETED` |
+
+两个 session bundle 均通过证据、预算和产物校验；meeting session 也通过 Replay CLI 读取验证。benchmark JSON 和可 Replay session 保留在被 Git 忽略的本机 `output/` 与 `sessions/`，不会作为通用样例提交。复现实测可运行：
 
 ```bash
 uv run python scripts/benchmark_agent.py \
